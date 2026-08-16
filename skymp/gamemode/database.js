@@ -1,6 +1,7 @@
 const mysql = require('mysql2/promise');
 const path = require('path');
 const fs = require('fs');
+const { runMigrations } = require('./core/migration-runner');
 
 let pool = null;
 
@@ -14,7 +15,7 @@ function init() {
     }
 
     const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    
+
     pool = mysql.createPool({
       host: config.host || '127.0.0.1',
       port: config.port || 3306,
@@ -49,6 +50,27 @@ async function getConnection() {
   return pool.getConnection();
 }
 
+/** Confirma que o pool alcança o MariaDB antes de liberar o runtime do jogo. */
+async function ping() {
+  if (!pool) init();
+  const connection = await pool.getConnection();
+  try {
+    await connection.ping();
+  } finally {
+    connection.release();
+  }
+}
+
+/** Aplica schema/migrations sob lock antes de liberar os modulos do jogo. */
+async function migrate(options = {}) {
+  const connection = await getConnection();
+  try {
+    return await runMigrations({ connection, ...options });
+  } finally {
+    connection.release();
+  }
+}
+
 /**
  * Fecha o pool e libera o event loop.
  *
@@ -74,6 +96,8 @@ module.exports = {
   init,
   query,
   getConnection,
+  ping,
+  migrate,
   close,
   getPool: () => pool
 };

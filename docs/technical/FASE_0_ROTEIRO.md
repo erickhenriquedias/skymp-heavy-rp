@@ -82,7 +82,7 @@ Todas vão no `skymp/gamemode/.env`. A coluna diz **para qual etapa** cada uma e
 |---|---|---|---|
 | 0.1 | `cd skymp/gamemode && npm test` | 444 passando | Não comece. Conserte antes. |
 | 0.2 | `npm run test:systems` | 13/13 | Comando, permissão ou flag fora do lugar |
-| 0.3 | `npm run check:schema` | `[OK] banco e migrations estao alinhados` | **Aplique as migrations pendentes** (`v2`→`v10`, em ordem; são idempotentes). Banco meio-migrado não quebra o boot — quebra a query que toca a coluna faltante, no meio de uma cena. Foi assim que a v9 nasceu: `characters.gold` estava só no `schema.sql`, então banco antigo migrado em ordem nunca a recebia, e **toda** operação de ouro falharia na etapa 5.6 |
+| 0.3 | `npm run db:setup` e depois `npm run check:schema` | runner chega à versão atual e o check imprime `[OK] banco e migrations estao alinhados` | Não aplique arquivos à mão. O runner usa lock, ordem numérica, checksum e retomada; qualquer falha bloqueia o boot antes dos módulos. |
 | 0.4 | Confira `apps/game-api/mods.json` | Existe e tem `mods` e `loadOrder` | `/mods.json` responde 503 e **ninguém entra**. Gere com `node scripts/generate-mods-manifest.js` |
 | 0.5 | `.\scripts\phase0\Start-AllServices.ps1` | Nenhum aviso vermelho | O script diz o que não vai subir. Ele não mente por otimismo |
 
@@ -110,7 +110,7 @@ Esta é a cadeia inteira: launcher → paridade → fila → sessão → master 
 | 1.1 | Abrir o launcher, logar com Discord | Perfil aparece | O launcher só captura o `code`; a troca é no painel (`/api/launcher/oauth/exchange`). Veja o log do `apps/web` |
 | 1.2 | Verificação de mods | Passa | **Anote o texto exato do erro.** "Plugin extra na load order" é o caso novo — significa que você tem um `.esp` que o servidor não conhece, e ele desloca os FormIDs |
 | 1.3 | Entrar na fila | Admitido | Fila exige ticket do painel, não `discordId` |
-| 1.4 | Confira `skymp_config.json` | Tem `session` preenchido | Sem isso o servidor não resolve identidade |
+| 1.4 | Confira `Data/Platform/Plugins/skymp5-client-settings.txt` | `gameData.session` preenchida e sem `profileId` | Sem isso o cliente não envia identidade remota; veja `AUTH_003_LAUNCHER_SESSION_HANDOFF.md` |
 | 1.5 | O jogo abre e conecta | A entra no mundo | Porta 7777. Se a UI não aparecer, veja `localhost:9000` |
 | 1.6 | No banco: `SELECT * FROM game_sessions ORDER BY id DESC LIMIT 1` | Linha com `resolve_count >= 1` | **Se `resolve_count` for 0, o master API não foi chamado** — o servidor está em `offlineMode` ou o `master` não aponta para o painel |
 

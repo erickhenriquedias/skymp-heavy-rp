@@ -1,6 +1,6 @@
 # Patches ao SkyMP e ao SkyrimPlatform
 
-**Hoje este diretório está vazio de patches, e essa é a situação preferida.**
+**Estado atual: um patch cliente registrado (`launcher-session-settings-auth`).** A política continua sendo voltar a zero assim que o upstream oferecer handoff equivalente.
 
 Ele existe porque a hora de escrever a política é antes do primeiro patch, não depois do quinto. Todo projeto do ecossistema SkyMP que acabou mantendo um fork pesado começou com um patch sem registro — [`SKYMP_ECOSYSTEM_DEEP_DIVE.md`](../docs/research/SKYMP_ECOSYSTEM_DEEP_DIVE.md) documenta os casos.
 

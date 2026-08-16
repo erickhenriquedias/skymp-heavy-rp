@@ -14,7 +14,9 @@
  *
  * Endpoints internos (X-Internal-Secret, chamados pelo gamemode):
  *   POST /internal/session/resolve   → valida ticket de sessão e marca conectado
- *   POST /internal/session/release   → libera o slot na desconexão
+ *   POST /internal/session/connected → master confirma a sessão exata
+ *   POST /internal/session/claim     → gamemode obtém lease opaco da conexão
+ *   POST /internal/session/release   → libera somente o lease exato
  *
  * Por que a fila não aceita `discordId` direto: `discordId` é público. O
  * launcher apresenta um ticket emitido pelo painel (que é quem tem o client
@@ -29,8 +31,16 @@ const crypto = require('crypto');
 const express = require('express');
 const mysql = require('mysql2/promise');
 
-const { createQueue } = require('./queue');
+const { createQueue, DEFAULT_RESERVATION_TTL_MS } = require('./queue');
+const { recoverQueueState } = require('./queueRecovery');
+const { createSessionLeaseService } = require('./sessionLeaseService');
+const { createReadinessProbe } = require('./readiness');
 const { createManifestLoader } = require('./modsManifest');
+const {
+  cleanupExpiredCredentials,
+  createCleanupScheduler
+} = require('./credentialRetention');
+const { createSlidingWindowRateLimiter } = require('../../skymp/packages/sliding-rate-limiter');
 
 const app = express();
 app.disable('x-powered-by');
@@ -39,6 +49,21 @@ app.use(express.json({ limit: '64kb' }));
 const PORT = parseInt(process.env.GAME_API_PORT || '7758', 10);
 const HOST = process.env.GAME_API_BIND_HOST || '0.0.0.0';
 const MANIFEST_PATH = process.env.MODS_MANIFEST_PATH || path.join(__dirname, 'mods.json');
+
+function readBooleanEnv(name, fallback = false) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  if (raw === 'true') return true;
+  if (raw === 'false') return false;
+  throw new Error(`${name} must be true or false`);
+}
+
+function normalizeMaintenanceMessage(value) {
+  const message = String(value || '').trim();
+  if (!message) return 'Servidor em manutenção. Tente novamente em breve.';
+  if (message.length > 160) throw new Error('MAINTENANCE_MESSAGE must have at most 160 characters');
+  return message;
+}
 
 function requireEnv(name) {
   const value = process.env[name];
@@ -63,8 +88,55 @@ const db = async (sql, params = []) => {
   return rows;
 };
 
+function readPositiveInteger(name, fallback) {
+  const value = Number(process.env[name] || fallback);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return value;
+}
+
+const credentialCleanupOptions = Object.freeze({
+  launchTicketRetentionMs: readPositiveInteger('LAUNCH_TICKET_RETENTION_SECONDS', 24 * 60 * 60) * 1000,
+  gameSessionRetentionMs: readPositiveInteger('GAME_SESSION_RETENTION_SECONDS', 7 * 24 * 60 * 60) * 1000,
+  batchSize: readPositiveInteger('CREDENTIAL_CLEANUP_BATCH_SIZE', 500),
+  maxBatches: readPositiveInteger('CREDENTIAL_CLEANUP_MAX_BATCHES', 10)
+});
+
+const credentialCleanupScheduler = createCleanupScheduler({
+  intervalMs: readPositiveInteger('CREDENTIAL_CLEANUP_INTERVAL_SECONDS', 15 * 60) * 1000,
+  cleanup: async () => {
+    const summary = await cleanupExpiredCredentials({
+      execute: async (sql, params) => {
+        const [result] = await pool.execute(sql, params);
+        return result;
+      },
+      ...credentialCleanupOptions
+    });
+    const deleted = summary.launchTickets.deleted + summary.gameSessions.deleted;
+    if (deleted > 0) {
+      console.log(`[game-api] Retencao removeu ${summary.launchTickets.deleted} launch_tickets e ${summary.gameSessions.deleted} game_sessions.`);
+    }
+    if (summary.launchTickets.saturated || summary.gameSessions.saturated) {
+      console.warn('[game-api] Retencao atingiu o limite de lotes; o backlog continua na proxima rodada.');
+    }
+    return summary;
+  }
+});
+
+function scheduleCredentialCleanup(options) {
+  const pending = credentialCleanupScheduler.trigger(options);
+  if (pending) {
+    pending.catch((err) => {
+      console.error('[game-api] Falha na retencao de credenciais:', err.message);
+    });
+  }
+}
+
 const manifestLoader = createManifestLoader(MANIFEST_PATH);
 const queue = createQueue({ capacity: parseInt(process.env.QUEUE_CAPACITY || '40', 10) });
+let maintenanceMode = readBooleanEnv('MAINTENANCE_MODE');
+let maintenanceMessage = normalizeMaintenanceMessage(process.env.MAINTENANCE_MESSAGE);
 
 const makeSessionTicket = () => crypto.randomBytes(32).toString('hex');
 
@@ -85,11 +157,47 @@ const GAME_SESSION_TTL_SECONDS = parseInt(process.env.GAME_SESSION_TTL_SECONDS |
  * credencial. Mesmo critério de `launch_tickets`.
  */
 async function persistGameSession(token, accountId, discordId) {
-  await db(
-    `INSERT INTO game_sessions (token_hash, account_id, discord_id, expires_at)
-     VALUES (?, ?, ?, DATE_ADD(NOW(), INTERVAL ? SECOND))`,
-    [hashTicket(token), accountId, discordId, GAME_SESSION_TTL_SECONDS]
-  );
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const [accounts] = await connection.execute(
+      'SELECT id FROM accounts WHERE id = ? FOR UPDATE',
+      [accountId]
+    );
+    if (accounts.length !== 1) throw new Error('account_not_found');
+    await connection.execute(
+      `UPDATE game_sessions
+          SET revoked_at = NOW(), disconnected_at = COALESCE(disconnected_at, NOW(6)),
+              connection_lease_hash = NULL
+        WHERE account_id = ? AND revoked_at IS NULL`,
+      [accountId]
+    );
+    const [result] = await connection.execute(
+      `INSERT INTO game_sessions (token_hash, account_id, discord_id, expires_at)
+       VALUES (?, ?, ?, DATE_ADD(NOW(), INTERVAL ? SECOND))`,
+      [hashTicket(token), accountId, discordId, GAME_SESSION_TTL_SECONDS]
+    );
+    await connection.commit();
+    return Number(result.insertId);
+  } catch (err) {
+    try { await connection.rollback(); } catch (_) { /* o erro original governa */ }
+    throw err;
+  } finally {
+    connection.release();
+  }
+}
+
+const admissionPersistenceLocks = new Map();
+
+function withAdmissionPersistenceLock(accountId, operation) {
+  const previous = admissionPersistenceLocks.get(accountId) || Promise.resolve();
+  const current = previous.catch(() => {}).then(operation);
+  admissionPersistenceLocks.set(accountId, current);
+  return current.finally(() => {
+    if (admissionPersistenceLocks.get(accountId) === current) {
+      admissionPersistenceLocks.delete(accountId);
+    }
+  });
 }
 
 /**
@@ -103,24 +211,60 @@ async function persistGameSession(token, accountId, discordId) {
  */
 async function persistAdmission(result, identity) {
   if (result.status !== 'success' || !result.ticket) return result;
-  try {
-    await persistGameSession(result.ticket, identity.accountId, identity.discordId);
-    return result;
-  } catch (err) {
-    console.error('[game-api] Falha ao gravar game_session:', err.message);
-    queue.release(identity.accountId, makeSessionTicket);
-    return { status: 'error', message: 'session_persist_failed' };
+  return withAdmissionPersistenceLock(identity.accountId, async () => {
+    try {
+      const existing = queue.getAdmission(identity.accountId);
+      if (!existing || existing.sessionTicket !== result.ticket) {
+        throw new Error('admission_changed_before_persistence');
+      }
+      // Dois polls podem observar o mesmo ticket antes do primeiro INSERT
+      // terminar. O lock por conta transforma o segundo em leitura idempotente.
+      if (Number.isSafeInteger(existing.sessionId) && existing.sessionId > 0) return result;
+
+      const sessionId = await persistGameSession(result.ticket, identity.accountId, identity.discordId);
+      if (!queue.bindSession(identity.accountId, result.ticket, sessionId)) {
+        await db(
+          `UPDATE game_sessions
+              SET revoked_at = NOW(), disconnected_at = NOW(6)
+            WHERE id = ? AND revoked_at IS NULL`,
+          [sessionId]
+        );
+        throw new Error('admission_changed_during_persistence');
+      }
+      return result;
+    } catch (err) {
+      console.error('[game-api] Falha ao gravar game_session:', err.message);
+      const current = queue.getAdmission(identity.accountId);
+      if (current?.sessionTicket === result.ticket) {
+        if (!queue.restoreSuperseded(identity.accountId, result.ticket)) {
+          queue.release(identity.accountId, makeSessionTicket);
+        }
+      }
+      return { status: 'error', message: 'session_persist_failed' };
+    }
+  });
+}
+
+let sessionLeaseService = createSessionLeaseService({
+  execute: db,
+  queue,
+  hashToken: hashTicket,
+  makeToken: makeSessionTicket,
+  makeSessionTicket
+});
+
+function setSessionLeaseServiceForTests(service) {
+  if (!service || typeof service.confirmConnected !== 'function' ||
+    typeof service.claim !== 'function' || typeof service.release !== 'function') {
+    throw new TypeError('session lease service inválido');
   }
+  sessionLeaseService = service;
 }
 
 // ── Rate limiting (janela deslizante em memória) ────────────────────────────
-const rateLimitBuckets = new Map();
+const rateLimiter = createSlidingWindowRateLimiter();
 function isRateLimited(key, maxRequests, windowMs) {
-  const now = Date.now();
-  const timestamps = (rateLimitBuckets.get(key) || []).filter((t) => now - t < windowMs);
-  timestamps.push(now);
-  rateLimitBuckets.set(key, timestamps);
-  return timestamps.length > maxRequests;
+  return rateLimiter.isLimited(key, maxRequests, windowMs);
 }
 
 function isValidInternalSecret(provided) {
@@ -136,6 +280,11 @@ function requireInternal(req, res, next) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   return next();
+}
+
+function rejectDuringMaintenance(_req, res, next) {
+  if (!maintenanceMode) return next();
+  return res.status(503).json({ status: 'maintenance', message: maintenanceMessage });
 }
 
 function hashTicket(token) {
@@ -175,7 +324,17 @@ async function isEligible(accountId) {
   const rows = await db(
     `SELECT a.status,
             (SELECT COUNT(*) FROM whitelist_applications w
-              WHERE w.account_id = a.id AND w.status = 'approved') AS approved_apps,
+              WHERE w.account_id = a.id
+                AND w.status = 'approved'
+                AND (
+                  COALESCE(w.approval_source, 'staff') <> 'discord_role'
+                  OR EXISTS (
+                    SELECT 1 FROM discord_role_access dra
+                     WHERE dra.account_id = a.id
+                       AND dra.eligible = 1
+                       AND dra.expires_at > NOW()
+                  )
+                )) AS approved_apps,
             (SELECT COUNT(*) FROM characters c
               WHERE c.account_id = a.id AND c.status = 'approved') AS approved_chars
      FROM accounts a WHERE a.id = ?`,
@@ -203,11 +362,12 @@ app.get('/mods.json', (req, res) => {
 
 // ── Fila ────────────────────────────────────────────────────────────────────
 
-app.post('/api/queue/join', async (req, res) => {
+app.post('/api/queue/join', rejectDuringMaintenance, async (req, res) => {
   const ip = req.ip || req.socket.remoteAddress || 'unknown';
   if (isRateLimited(`queue-join:${ip}`, 20, 60 * 1000)) {
     return res.status(429).json({ status: 'error', message: 'rate_limited' });
   }
+  scheduleCredentialCleanup();
 
   try {
     const identity = await consumeLaunchTicket((req.body || {}).ticket);
@@ -250,11 +410,12 @@ app.post('/api/queue/join', async (req, res) => {
  * `server.http.test.js` manda um ticket pela query e exige 401 — se alguém
  * reintroduzir a leitura por lá, aquele teste quebra.
  */
-app.post('/api/queue/status', async (req, res) => {
+app.post('/api/queue/status', rejectDuringMaintenance, async (req, res) => {
   const ip = req.ip || req.socket.remoteAddress || 'unknown';
   if (isRateLimited(`queue-status:${ip}`, 120, 60 * 1000)) {
     return res.status(429).json({ status: 'error', message: 'rate_limited' });
   }
+  scheduleCredentialCleanup();
 
   try {
     const identity = await consumeLaunchTicket((req.body || {}).ticket);
@@ -298,38 +459,202 @@ app.post('/internal/session/resolve', requireInternal, (req, res) => {
   res.json({ ok: true, accountId: entry.accountId, discordId: entry.discordId });
 });
 
-app.post('/internal/session/release', requireInternal, (req, res) => {
+app.post('/internal/session/connected', requireInternal, async (req, res) => {
   const accountId = Number((req.body || {}).accountId);
-  if (!Number.isInteger(accountId)) return res.status(400).json({ ok: false, error: 'invalid_account_id' });
-  const released = queue.release(accountId, makeSessionTicket);
-  res.json({ ok: true, released });
+  const sessionId = Number((req.body || {}).sessionId);
+  if (!Number.isSafeInteger(accountId) || accountId <= 0) {
+    return res.status(400).json({ ok: false, error: 'invalid_account_id' });
+  }
+  if (!Number.isSafeInteger(sessionId) || sessionId <= 0) {
+    return res.status(400).json({ ok: false, error: 'invalid_session_id' });
+  }
+  try {
+    const result = await sessionLeaseService.confirmConnected(accountId, sessionId);
+    if (!result.ok) return res.status(409).json({ ok: false, error: result.reason });
+    return res.json({ ok: true, marked: true });
+  } catch (err) {
+    console.error('[game-api] /internal/session/connected', err.message);
+    return res.status(503).json({ ok: false, error: 'session_store_unavailable' });
+  }
 });
 
-// ── Diagnóstico ─────────────────────────────────────────────────────────────
+app.post('/internal/session/claim', requireInternal, async (req, res) => {
+  const accountId = Number((req.body || {}).accountId);
+  if (!Number.isSafeInteger(accountId) || accountId <= 0) {
+    return res.status(400).json({ ok: false, error: 'invalid_account_id' });
+  }
+  try {
+    const result = await sessionLeaseService.claim(accountId);
+    if (!result.ok) return res.status(409).json({ ok: false, error: result.reason });
+    return res.json({ ok: true, leaseToken: result.leaseToken });
+  } catch (err) {
+    console.error('[game-api] /internal/session/claim', err.message);
+    return res.status(503).json({ ok: false, error: 'session_store_unavailable' });
+  }
+});
 
-app.get('/health', (req, res) => {
-  const manifest = manifestLoader.load();
-  res.json({
-    ok: manifest.ok,
-    manifest: manifest.ok
-      ? { mods: manifest.manifest.mods.length, plugins: manifest.manifest.loadOrder.length }
-      : { error: manifest.reason },
-    queue: queue.snapshot()
+app.post('/internal/session/release', requireInternal, async (req, res) => {
+  try {
+    const result = await sessionLeaseService.release((req.body || {}).leaseToken);
+    if (!result.ok) return res.status(400).json(result);
+    return res.json(result);
+  } catch (err) {
+    console.error('[game-api] /internal/session/release', err.message);
+    return res.status(503).json({ ok: false, released: false, error: 'session_store_unavailable' });
+  }
+});
+
+// ── Diagnóstico operacional ─────────────────────────────────────────────────
+
+// Liveness responde somente se o processo Express está vivo. Não consulta
+// disco/banco e não expõe capacidade, ocupação ou quantidade de jogadores.
+app.get('/health', (_req, res) => res.json({ ok: true }));
+
+const defaultReadinessProbe = createReadinessProbe({
+  execute: db,
+  loadManifest: () => manifestLoader.load(),
+  isMaintenance: () => maintenanceMode
+});
+
+let readinessProbe = defaultReadinessProbe;
+const STATUS_READINESS_CACHE_MS = 2000;
+let statusReadinessCache = null;
+let statusReadinessPending = null;
+
+function cachedStatusReadiness() {
+  const now = Date.now();
+  if (statusReadinessCache && now - statusReadinessCache.checkedAt < STATUS_READINESS_CACHE_MS) {
+    return Promise.resolve(statusReadinessCache.result);
+  }
+  if (statusReadinessPending) return statusReadinessPending;
+  statusReadinessPending = Promise.resolve()
+    .then(() => readinessProbe())
+    .then(result => {
+      statusReadinessCache = { checkedAt: Date.now(), result };
+      return result;
+    })
+    .finally(() => { statusReadinessPending = null; });
+  return statusReadinessPending;
+}
+
+app.get('/ready', async (_req, res) => {
+  try {
+    const result = await readinessProbe();
+    const ready = result?.ready === true;
+    return res.status(ready ? 200 : 503).json({
+      ready,
+      checks: result?.checks || {
+        database: 'unavailable', manifest: 'unavailable', maintenance: 'unknown'
+      }
+    });
+  } catch (_) {
+    return res.status(503).json({
+      ready: false,
+      checks: { database: 'unavailable', manifest: 'unavailable', maintenance: 'unknown' }
+    });
+  }
+});
+
+// Estado público para apresentação. Diferente de /health, estas contagens são
+// deliberadamente públicas e não carregam contas, reservas ou identificadores.
+app.get('/status', async (_req, res) => {
+  if (maintenanceMode) {
+    const snapshot = queue.snapshot();
+    return res.json({
+      state: 'maintenance',
+      players: snapshot.connected,
+      capacity: snapshot.capacity,
+      queue: snapshot.waiting,
+      message: maintenanceMessage
+    });
+  }
+
+  let operational;
+  try { operational = await cachedStatusReadiness(); } catch (_) { operational = { ready: false }; }
+  const snapshot = queue.snapshot();
+  if (operational?.ready !== true) {
+    return res.json({
+      state: 'starting',
+      players: snapshot.connected,
+      capacity: snapshot.capacity,
+      queue: snapshot.waiting,
+      message: 'Servidor inicializando ou temporariamente indisponível.'
+    });
+  }
+  return res.json({
+    state: snapshot.occupied >= snapshot.capacity ? 'full' : 'online',
+    players: snapshot.connected,
+    capacity: snapshot.capacity,
+    queue: snapshot.waiting,
+    message: null
   });
 });
 
-if (require.main === module) {
-  app.listen(PORT, HOST, () => {
-    console.log(`[game-api] Rodando em http://${HOST}:${PORT}`);
-    const manifest = manifestLoader.load();
-    if (!manifest.ok) {
-      console.warn(`[game-api] ATENCAO: manifesto de mods indisponivel (${manifest.reason}).`);
-      console.warn('[game-api] Gere com: node scripts/generate-mods-manifest.js <caminho-do-Data>');
-      console.warn('[game-api] Ate la, /mods.json responde 503 e nenhum jogador consegue entrar.');
-    } else {
-      console.log(`[game-api] Manifesto: ${manifest.manifest.mods.length} arquivos, ${manifest.manifest.loadOrder.length} plugins.`);
-    }
+function setReadinessProbeForTests(probe) {
+  statusReadinessCache = null;
+  statusReadinessPending = null;
+  if (probe === null) {
+    readinessProbe = defaultReadinessProbe;
+    return;
+  }
+  if (typeof probe !== 'function') throw new TypeError('readiness probe inválido');
+  readinessProbe = probe;
+}
+
+function setMaintenanceForTests(enabled, message) {
+  maintenanceMode = enabled === true;
+  maintenanceMessage = normalizeMaintenanceMessage(message);
+  statusReadinessCache = null;
+}
+
+async function recoverQueueOccupancy() {
+  return recoverQueueState({
+    execute: db,
+    queue,
+    reservationTtlMs: DEFAULT_RESERVATION_TTL_MS
   });
 }
 
-module.exports = { app, queue, consumeLaunchTicket, isEligible };
+async function startServer() {
+  // A porta só abre depois desta consulta. Se o MariaDB estiver indisponível
+  // ou devolver estado inválido, admitir com fila vazia criaria overbooking.
+  const recovered = await recoverQueueOccupancy();
+  console.log(`[game-api] Fila recuperada: ${recovered.accounts} conta(s), ${recovered.connected} conectada(s), ${recovered.reservations} reserva(s).`);
+
+  const server = await new Promise((resolve, reject) => {
+    const instance = app.listen(PORT, HOST, () => resolve(instance));
+    instance.once('error', reject);
+  });
+
+  console.log(`[game-api] Rodando em http://${HOST}:${PORT}`);
+  scheduleCredentialCleanup({ force: true });
+  const manifest = manifestLoader.load();
+  if (!manifest.ok) {
+    console.warn(`[game-api] ATENCAO: manifesto de mods indisponivel (${manifest.reason}).`);
+    console.warn('[game-api] Gere com: node scripts/generate-mods-manifest.js <caminho-do-Data>');
+    console.warn('[game-api] Ate la, /mods.json responde 503 e nenhum jogador consegue entrar.');
+  } else {
+    console.log(`[game-api] Manifesto: ${manifest.manifest.mods.length} arquivos, ${manifest.manifest.loadOrder.length} plugins.`);
+  }
+  return server;
+}
+
+if (require.main === module) {
+  startServer().catch(async (err) => {
+    console.error('[game-api] Boot recusado: nao foi possivel recuperar a fila:', err.message);
+    process.exitCode = 1;
+    try { await pool.end(); } catch (_) { /* erro original governa o exit code */ }
+  });
+}
+
+module.exports = {
+  app,
+  queue,
+  consumeLaunchTicket,
+  isEligible,
+  recoverQueueOccupancy,
+  startServer,
+  setSessionLeaseServiceForTests,
+  setReadinessProbeForTests,
+  setMaintenanceForTests
+};

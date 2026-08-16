@@ -219,6 +219,40 @@ describe('module-registry — ciclo de vida', () => {
     assert.equal(moduleRegistry.getState('nao-existe'), null);
   });
 
+  it('readiness falha quando core habilitado não inicializa', async () => {
+    moduleRegistry.register(modulo('fronteira', {
+      phase: 'core',
+      initialize: async () => { throw new Error('sem dependencia'); }
+    }));
+    ligar('TEST_ENABLE_FRONTEIRA');
+    await semLog(() => moduleRegistry.bootAll());
+
+    assert.throws(() => moduleRegistry.assertCoreReady(), /fronteira.*FAILED/);
+  });
+
+  it('readiness falha quando health check de core reprova', async () => {
+    moduleRegistry.register(modulo('fronteira', {
+      phase: 'core',
+      healthCheck: () => false
+    }));
+    ligar('TEST_ENABLE_FRONTEIRA');
+    await semLog(() => moduleRegistry.bootAll());
+
+    assert.throws(() => moduleRegistry.assertCoreReady(), /fronteira.*healthCheck=false/);
+  });
+
+  it('readiness ignora lab com falha e core desligado por configuração', async () => {
+    moduleRegistry.register(modulo('core-opcional', { phase: 'core' }));
+    moduleRegistry.register(modulo('laboratorio', {
+      phase: 'lab',
+      initialize: async () => { throw new Error('spike quebrou'); }
+    }));
+    ligar('TEST_ENABLE_LABORATORIO');
+    await semLog(() => moduleRegistry.bootAll());
+
+    assert.equal(moduleRegistry.assertCoreReady(), true);
+  });
+
   it('desliga na ordem inversa do boot', async () => {
     const ordem = [];
     moduleRegistry.register(modulo('base', { shutdown: async () => { ordem.push('base'); } }));

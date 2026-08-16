@@ -25,6 +25,11 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const {
+  MODS_MANIFEST_CHANNELS,
+  MODS_MANIFEST_VERSION,
+  validateModsManifestContract
+} = require('../../../skymp/packages/mods-manifest-contract');
 
 const PLUGIN_EXTENSIONS = ['.esm', '.esp', '.esl'];
 // Extensões que valem a pena verificar por hash. Não incluímos tudo: uma pasta
@@ -34,12 +39,21 @@ const PLUGIN_EXTENSIONS = ['.esm', '.esp', '.esl'];
 const HASHED_EXTENSIONS = [...PLUGIN_EXTENSIONS, '.bsa', '.bsl'];
 
 function parseArgs(argv) {
-  const args = { dataDir: null, out: null, pluginsTxt: null, onlyLoadOrder: false };
+  const args = {
+    dataDir: null,
+    out: null,
+    pluginsTxt: null,
+    onlyLoadOrder: false,
+    channel: process.env.MODPACK_CHANNEL || 'development',
+    build: process.env.MODPACK_BUILD || 'unversioned'
+  };
   const rest = [];
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--out') { args.out = argv[++i]; continue; }
     if (argv[i] === '--plugins-txt') { args.pluginsTxt = argv[++i]; continue; }
     if (argv[i] === '--only-load-order') { args.onlyLoadOrder = true; continue; }
+    if (argv[i] === '--channel') { args.channel = argv[++i]; continue; }
+    if (argv[i] === '--build') { args.build = argv[++i]; continue; }
     rest.push(argv[i]);
   }
   args.dataDir = rest[0] || null;
@@ -83,7 +97,16 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
 
   if (!args.dataDir) {
-    console.error('Uso: node scripts/generate-mods-manifest.js <caminho-do-Data> [--out mods.json] [--plugins-txt plugins.txt] [--only-load-order]');
+    console.error('Uso: node scripts/generate-mods-manifest.js <Data> [--out mods.json] [--plugins-txt plugins.txt] [--only-load-order] [--channel development|beta|stable] [--build id]');
+    process.exit(1);
+  }
+
+  if (!MODS_MANIFEST_CHANNELS.includes(args.channel)) {
+    console.error(`[manifest] Canal invalido: ${args.channel}. Use ${MODS_MANIFEST_CHANNELS.join(', ')}.`);
+    process.exit(1);
+  }
+  if (typeof args.build !== 'string' || args.build.trim().length === 0 || args.build.length > 128) {
+    console.error('[manifest] --build precisa ser um identificador nao vazio de ate 128 caracteres.');
     process.exit(1);
   }
 
@@ -175,12 +198,17 @@ async function main() {
   }
 
   const manifest = {
+    manifestVersion: MODS_MANIFEST_VERSION,
+    channel: args.channel,
+    build: args.build.trim(),
     generatedAt: new Date().toISOString(),
-    sourceDataDir: dataDir,
     loadOrderSource: args.pluginsTxt ? 'plugins.txt' : 'directory-order (NAO CONFIAVEL)',
     mods,
     loadOrder
   };
+
+  const contract = validateModsManifestContract(manifest);
+  if (!contract.ok) throw new Error(`Contrato do manifesto invalido: ${contract.reason}`);
 
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
   fs.writeFileSync(outPath, JSON.stringify(manifest, null, 2));

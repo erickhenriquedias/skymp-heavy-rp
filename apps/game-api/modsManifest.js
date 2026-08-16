@@ -16,6 +16,7 @@
  */
 
 const fs = require('fs');
+const { validateModsManifestContract } = require('../../skymp/packages/mods-manifest-contract');
 
 function isValidManifest(data) {
   if (!data || typeof data !== 'object') return false;
@@ -59,8 +60,14 @@ function createManifestLoader(manifestPath) {
       return { ok: false, reason: 'manifest_invalid_json' };
     }
 
+    const contract = validateModsManifestContract(parsed);
+    if (!contract.ok) return contract;
+
     if (!isValidManifest(parsed)) {
       return { ok: false, reason: 'manifest_invalid_shape' };
+    }
+    if (parsed.mods.length === 0 || parsed.loadOrder.length === 0) {
+      return { ok: false, reason: 'manifest_empty' };
     }
 
     cached = parsed;

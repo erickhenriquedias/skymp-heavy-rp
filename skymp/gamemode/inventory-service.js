@@ -13,18 +13,10 @@
  *   - um dono muda (staff dá item, recompensa)      → daqui, ou transaction-service
  *   - **dois** donos (troca, baú, barraca, craft)   → `core/inventory.transfer`
  *
- * ─── Limite conhecido da reconciliação ──────────────────────────────────────
- *
- * `syncInventoryToClient` é **unidirecional**: ela entrega ao cliente o que o
- * banco conhece e nunca faz o contrário. Ela não remove do cliente o que o
- * cliente tem e o banco não conhece, não compara contagens, e roda uma vez só
- * (chamador único: `whitelist.js`).
- *
- * Consequência: item pego do chão, saque de NPC vanilla e recompensa de quest
- * existem só no cliente, para sempre. Isso é a fronteira nomeada no
- * `docs/technical/ADR_003_INVENTORY_SOURCE_OF_TRUTH.md` §3 — fechá-la exige ler
- * `mp.get(id,'inventory')` (ainda **[DOC]** em `types/mp.d.ts`, nunca
- * exercitada) e decidir uma política de divergência, que é decisão de jogo.
+ * A projeção é absoluta para stacks conhecidos pelo MariaDB: lê a contagem
+ * nativa e aplica somente o delta. Reconnect/restart, portanto, não soma de
+ * novo os mesmos itens. BaseIds exclusivamente nativos são preservados por
+ * compatibilidade com loot/quests vanilla, mas nunca são importados para o DB.
  *
  * Serviço de inventário com reconciliação para prevenir duplicatas.
  *
@@ -42,10 +34,11 @@
 const db = require('./database');
 const transactionService = require('./core/transaction-service');
 const { actorRef } = require('./core/papyrus');
+const skympAdapter = require('./core/skymp-adapter');
+const { planStackProjection } = require('./core/inventory-projection');
 
-// Cache de itens já sincronizados nessa sessão: characterId → Set<baseId>
-// Reset automático na desconexão (cleanup via removeActiveCharacter)
-const _syncedThisSession = new Map();
+// Serializa projeções concorrentes do mesmo personagem sem lock global.
+const _projectionChains = new Map();
 
 /**
  * Sincroniza o inventário do banco de dados para o cliente.
@@ -54,63 +47,81 @@ const _syncedThisSession = new Map();
  * @param {number} actorId
  * @param {number} characterId
  */
-async function syncInventoryToClient(actorId, characterId) {
+async function _syncInventoryToClient(actorId, characterId) {
+  if (!Number.isSafeInteger(actorId) || actorId <= 0) throw new Error('actorId invalido para projecao');
+  if (!Number.isSafeInteger(characterId) || characterId <= 0) throw new Error('characterId invalido para projecao');
+
   try {
     const rows = await db.query(
-      'SELECT base_id, count FROM character_inventory WHERE character_id = ?',
-      [characterId]
+      `SELECT managed.base_id, COALESCE(current_stack.count, 0) AS count
+         FROM (
+           SELECT base_id FROM character_inventory WHERE character_id = ?
+           UNION
+           SELECT base_id FROM inventory_transactions WHERE character_id = ?
+         ) AS managed
+         LEFT JOIN character_inventory AS current_stack
+           ON current_stack.character_id = ? AND current_stack.base_id = managed.base_id
+        ORDER BY managed.base_id`,
+      [characterId, characterId, characterId]
     );
 
-    // Inicializar set de sincronizados para essa sessão
-    if (!_syncedThisSession.has(characterId)) {
-      _syncedThisSession.set(characterId, new Set());
-    }
-    const synced = _syncedThisSession.get(characterId);
-
-    let syncedCount = 0;
-    let skippedCount = 0;
-
-    for (const row of rows) {
-      if (synced.has(row.base_id)) {
-        // Já foi entregue nessa sessão — pular para prevenir duplicata
-        skippedCount++;
-        continue;
-      }
-
-      if (typeof mp !== 'undefined') {
-        try {
-          mp.callPapyrusFunction('method', 'ObjectReference', 'AddItem', actorRef(actorId), [row.base_id, row.count, true]);
-          synced.add(row.base_id);
-          syncedCount++;
-        } catch (clientErr) {
-          // Falha no cliente: BD está correto, cliente pode ficar divergente
-          // Será resolvido na próxima sincronização ou reconexão
-          console.error(`[inventory] Aviso: falha ao sincronizar item 0x${row.base_id.toString(16)} para actor ${actorId.toString(16)}:`, clientErr.message);
-        }
-      } else {
-        // Sem runtime mp (ambiente de teste) — apenas marcar como sincronizado
-        synced.add(row.base_id);
-        syncedCount++;
-      }
+    if (typeof mp === 'undefined') {
+      return { additions: 0, removals: 0, managedStacks: rows.length, nativeOnlyStacks: 0 };
     }
 
-    console.log(`[inventory] Sync para char ${characterId}: ${syncedCount} itens entregues, ${skippedCount} já sincronizados (total no BD: ${rows.length})`);
-    
-    if (skippedCount > 0) {
-      console.log(`[inventory] Reconciliação: ${skippedCount} itens pulados por já estarem na sessão (previne duplicatas)`);
+    const nativeInventory = mp.get(actorId, 'inventory');
+    const plan = planStackProjection(rows, nativeInventory);
+
+    // Remover antes de adicionar reduz risco de ultrapassar capacidade nativa.
+    for (const operation of plan.removals) {
+      skympAdapter.callPapyrus(
+        'method', 'ObjectReference', 'RemoveItem', actorRef(actorId),
+        [operation.baseId, operation.count, true, null]
+      );
     }
+    for (const operation of plan.additions) {
+      skympAdapter.callPapyrus(
+        'method', 'ObjectReference', 'AddItem', actorRef(actorId),
+        [operation.baseId, operation.count, true]
+      );
+    }
+
+    // O binding do SkyMP pode falhar/ignorar sem uma excecao util dependendo
+    // do artefato. Relido do servidor, nao do client: readiness do personagem
+    // so passa quando os baseIds gerenciados realmente convergiram.
+    const verification = planStackProjection(rows, mp.get(actorId, 'inventory'));
+    if (verification.additions.length > 0 || verification.removals.length > 0) {
+      throw new Error(
+        `projecao nao convergiu (${verification.additions.length} adicoes e ` +
+        `${verification.removals.length} remocoes ainda pendentes)`
+      );
+    }
+
+    const result = {
+      additions: plan.additions.length,
+      removals: plan.removals.length,
+      managedStacks: plan.managedStacks,
+      nativeOnlyStacks: plan.nativeOnlyStacks
+    };
+    console.log(
+      `[inventory] Projecao char ${characterId}: +${result.additions}/-${result.removals} stacks, ` +
+      `${result.managedStacks} gerenciados, ${result.nativeOnlyStacks} somente nativos preservados`
+    );
+    return result;
 
   } catch (err) {
-    console.error(`[inventory] Erro ao sincronizar inventário para char ${characterId}:`, err.message);
+    console.error(`[inventory] Erro ao projetar inventário do char ${characterId}:`, err.message);
+    throw err;
   }
 }
 
-/**
- * Limpa o cache de sincronização ao desconectar.
- * @param {number} characterId
- */
-function clearSyncCache(characterId) {
-  _syncedThisSession.delete(characterId);
+function syncInventoryToClient(actorId, characterId) {
+  const previous = _projectionChains.get(characterId) || Promise.resolve();
+  const current = previous.catch(() => {}).then(() => _syncInventoryToClient(actorId, characterId));
+  _projectionChains.set(characterId, current);
+  return current.finally(() => {
+    if (_projectionChains.get(characterId) === current) _projectionChains.delete(characterId);
+  });
 }
 
 /**
@@ -159,7 +170,6 @@ async function hasItem(characterId, baseId, minCount = 1) {
 
 module.exports = {
   syncInventoryToClient,
-  clearSyncCache,
   giveItem,
   removeItem,
   hasItem

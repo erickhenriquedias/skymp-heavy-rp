@@ -61,3 +61,13 @@ test('profile contract accepts only a positive safe integer', () => {
   assert.equal(whitelist.accountIdFromProfileId(0), null);
   assert.equal(whitelist.accountIdFromProfileId('discord-id'), null);
 });
+
+test('aprovação via Discord exige concessão de cargo ativa e não expirada', async () => {
+  await whitelist.checkWhitelist(1, 42, 0xff000001);
+  const query = queries.find(({ sql }) => /FROM whitelist_applications w/i.test(sql));
+  assert.ok(query, 'consulta efetiva de whitelist não foi executada');
+  assert.match(query.sql, /approval_source/);
+  assert.match(query.sql, /FROM discord_role_access/);
+  assert.match(query.sql, /eligible = 1/);
+  assert.match(query.sql, /expires_at > NOW\(\)/);
+});

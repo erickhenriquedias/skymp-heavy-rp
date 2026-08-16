@@ -3,6 +3,18 @@
 CREATE DATABASE IF NOT EXISTS `skymp_rp` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE `skymp_rp`;
 
+-- Controle do runner automatico. O checksum impede alterar silenciosamente uma
+-- migration que ja foi aplicada em outro ambiente.
+CREATE TABLE IF NOT EXISTS `schema_migrations` (
+  `version`     INT UNSIGNED NOT NULL,
+  `name`        VARCHAR(191) NOT NULL,
+  `checksum`    CHAR(64) NOT NULL,
+  `duration_ms` INT UNSIGNED NOT NULL,
+  `applied_at`  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`version`),
+  UNIQUE KEY `uq_schema_migrations_name` (`name`)
+) ENGINE=InnoDB;
+
 -- 1. Contas de Jogadores (com suporte a VIP e Monetizacao)
 CREATE TABLE IF NOT EXISTS `accounts` (
   `id` INT AUTO_INCREMENT PRIMARY KEY,
@@ -28,15 +40,56 @@ CREATE TABLE IF NOT EXISTS `discord_identities` (
   CONSTRAINT `fk_discord_account` FOREIGN KEY (`account_id`) REFERENCES `accounts` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
+CREATE TABLE IF NOT EXISTS `discord_role_access` (
+  `account_id` INT NOT NULL,
+  `discord_id` VARCHAR(64) NOT NULL,
+  `eligible` TINYINT(1) NOT NULL DEFAULT 0,
+  `matched_role_id` VARCHAR(64) DEFAULT NULL,
+  `verified_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `expires_at` TIMESTAMP NOT NULL,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`account_id`),
+  UNIQUE KEY `uq_discord_role_access_identity` (`discord_id`),
+  KEY `idx_discord_role_access_expiry` (`eligible`, `expires_at`),
+  CONSTRAINT `fk_discord_role_access_account` FOREIGN KEY (`account_id`) REFERENCES `accounts` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_discord_role_access_identity` FOREIGN KEY (`discord_id`) REFERENCES `discord_identities` (`discord_id`) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- Sessões de entrada resolvidas uma única vez pelo master. O token e o lease
+-- ficam somente como SHA-256; o lease identifica a conexão exata no disconnect.
+CREATE TABLE IF NOT EXISTS `game_sessions` (
+  `id` INT AUTO_INCREMENT PRIMARY KEY,
+  `token_hash` CHAR(64) NOT NULL,
+  `account_id` INT NOT NULL,
+  `discord_id` VARCHAR(64) NOT NULL,
+  `issued_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `expires_at` TIMESTAMP NOT NULL,
+  `last_resolved_at` TIMESTAMP NULL DEFAULT NULL,
+  `resolve_count` INT NOT NULL DEFAULT 0 COMMENT '0=disponível; 1=consumida pelo master',
+  `revoked_at` TIMESTAMP NULL DEFAULT NULL,
+  `connection_lease_hash` CHAR(64) NULL COMMENT 'SHA-256 do lease da conexão atual',
+  `connected_at` DATETIME(6) NULL,
+  `disconnected_at` DATETIME(6) NULL,
+  UNIQUE KEY `uq_game_session_hash` (`token_hash`),
+  UNIQUE KEY `uq_game_session_connection_lease` (`connection_lease_hash`),
+  KEY `idx_game_session_account` (`account_id`, `expires_at`),
+  KEY `idx_game_session_expiry` (`expires_at`),
+  CONSTRAINT `fk_game_session_account` FOREIGN KEY (`account_id`) REFERENCES `accounts` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
 -- 3. Formulários de Whitelist
 CREATE TABLE IF NOT EXISTS `whitelist_applications` (
   `id` INT AUTO_INCREMENT PRIMARY KEY,
   `account_id` INT NOT NULL,
+  `character_id` INT DEFAULT NULL,
   `status` VARCHAR(32) NOT NULL DEFAULT 'pending' COMMENT 'pending, approved, rejected',
+  `approval_source` VARCHAR(32) DEFAULT NULL COMMENT 'staff, discord_role ou local',
   `reviewed_by` VARCHAR(128) DEFAULT NULL,
   `reviewer_notes` TEXT DEFAULT NULL,
   `reviewed_at` TIMESTAMP NULL DEFAULT NULL,
   `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY `uq_whitelist_character` (`character_id`),
+  KEY `idx_whitelist_account_status_created` (`account_id`, `status`, `created_at`),
   CONSTRAINT `fk_whitelist_account` FOREIGN KEY (`account_id`) REFERENCES `accounts` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
@@ -379,7 +432,8 @@ CREATE TABLE IF NOT EXISTS `inventory_transactions` (
   `status`           VARCHAR(16)  NOT NULL DEFAULT 'committed' COMMENT 'committed, rolled_back',
   `created_at`       TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT `fk_inv_tx_char` FOREIGN KEY (`character_id`) REFERENCES `characters` (`id`) ON DELETE CASCADE,
-  INDEX `idx_inv_tx_char_date` (`character_id`, `created_at`)
+  INDEX `idx_inv_tx_char_date` (`character_id`, `created_at`),
+  INDEX `idx_inv_tx_char_item` (`character_id`, `base_id`)
 ) ENGINE=InnoDB;
 
 -- D. Ledger de Ouro

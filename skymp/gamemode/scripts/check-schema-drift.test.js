@@ -72,6 +72,32 @@ describe('parser, contra as migrations reais do repositório', () => {
     }
   });
 
+  it('inclui o vínculo e os índices atômicos da whitelist da v17', () => {
+    const whitelist = esperado.get('whitelist_applications');
+    assert.ok(whitelist.colunas.has('character_id'));
+    assert.ok(whitelist.indices.has('uq_whitelist_character'));
+    assert.ok(whitelist.indices.has('idx_whitelist_account_status_created'));
+  });
+
+  it('inclui concessão de acesso por cargo Discord da v18', () => {
+    const whitelist = esperado.get('whitelist_applications');
+    const access = esperado.get('discord_role_access');
+    assert.ok(whitelist.colunas.has('approval_source'));
+    assert.ok(access, 'discord_role_access não foi extraída');
+    for (const column of ['account_id', 'discord_id', 'eligible', 'matched_role_id', 'expires_at']) {
+      assert.ok(access.colunas.has(column), `discord_role_access.${column} ausente`);
+    }
+    assert.ok(access.indices.has('idx_discord_role_access_expiry'));
+  });
+
+  it('inclui lease exato de conexão e índice único da v19', () => {
+    const sessions = esperado.get('game_sessions');
+    for (const column of ['connection_lease_hash', 'connected_at', 'disconnected_at']) {
+      assert.ok(sessions.colunas.has(column), `game_sessions.${column} ausente`);
+    }
+    assert.ok(sessions.indices.has('uq_game_session_connection_lease'));
+  });
+
   it('extrai índices adicionados por ALTER TABLE', () => {
     // A v7 é a mais perigosa de faltar: sem ela nada quebra, só fica lento
     // sob carga — que é quando ninguém está olhando o schema.

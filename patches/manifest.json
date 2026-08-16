@@ -6,5 +6,25 @@
     "pin": "d85f18d808f877401c4e20484d2c2f6f73cf9caa",
     "pin_date": "2026-08-06"
   },
-  "patches": []
+  "patches": [
+    {
+      "id": "launcher-session-settings-auth",
+      "target": "skymp",
+      "file": "skymp/launcher-session-settings-auth.patch",
+      "upstream_commit": "d85f18d808f877401c4e20484d2c2f6f73cf9caa",
+      "reason": "O cliente upstream só reconhece profileId nas settings e força o fluxo offline; uma sessão opaca emitida por launcher externo não chega ao login online do servidor.",
+      "files_touched": [
+        "skymp5-client/src/features/authModel.ts",
+        "skymp5-client/src/services/services/authService.ts",
+        "skymp5-server/ts/systems/login.ts"
+      ],
+      "impact": "gameData.session válida nas settings passa a produzir AuthGameData.remote; profileId continua disponível para laboratório offline, mas nunca tem precedência sobre uma sessão remota. Falhas de login deixam de registrar o bearer em texto puro.",
+      "test": "patches/launcher-session-auth.contract.test.mjs e apps/launcher/electron/auth-settings.test.mjs",
+      "loss_condition": "Reclone, reinstalação do artefato cliente ou upgrade do SkyMP sem reaplicar este patch remove silenciosamente o suporte à sessão do launcher.",
+      "removal_strategy": "Remover quando o upstream expuser um handoff de sessão externa equivalente e o pin subir para o commit que o contém.",
+      "upstream_pr": null,
+      "added": "2026-08-16",
+      "notes": "PR ainda não aberto: a contribuição exige decisão explícita de quem assinará o CAA upstream e o efeito precisa primeiro passar pelo E2E com dois clientes Skyrim reais. O patch não contém regra Heavy nem referência a Discord."
+    }
+  ]
 }

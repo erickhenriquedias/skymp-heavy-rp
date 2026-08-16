@@ -44,7 +44,12 @@ process.env.SESSION_SECRET = 'test-session-secret';
 process.env.DISCORD_CLIENT_ID = 'test-client-id';
 process.env.DISCORD_CLIENT_SECRET = 'test-client-secret';
 
-const { app, validateApplication, hashTicket } = require(path.join(__dirname, 'server.js'));
+const {
+  app,
+  validateApplication,
+  hashTicket,
+  setSessionOccupancyNotifierForTests
+} = require(path.join(__dirname, 'server.js'));
 
 Module._load = realLoad;
 
@@ -66,6 +71,7 @@ after(async () => {
 beforeEach(() => {
   queryLog.length = 0;
   queryHandler = () => [];
+  setSessionOccupancyNotifierForTests(async () => ({ ok: true, marked: true }));
 });
 
 const get = (p, opts) => fetch(`${baseUrl}${p}`, { redirect: 'manual', ...opts });
@@ -289,6 +295,14 @@ describe('master API de sessão (contrato do SkyMP)', () => {
   const MASTER_KEY = 'chave-do-servidor-de-teste';
   const SESSION = 'b'.repeat(64);
 
+  function activeSession(row, affectedRows = 1) {
+    return sql => {
+      if (/SELECT id, account_id, discord_id FROM game_sessions/i.test(sql)) return [row];
+      if (/UPDATE game_sessions/i.test(sql)) return { affectedRows };
+      return [];
+    };
+  }
+
   test('masterKey errada responde 404, não 403', async () => {
     // 404 e não 403 de propósito: não confirmamos a existência da chave certa
     // pra quem está adivinhando.
@@ -312,12 +326,7 @@ describe('master API de sessão (contrato do SkyMP)', () => {
   });
 
   test('sessão válida responde no formato que o SkyMP espera', async () => {
-    queryHandler = (sql) => {
-      if (/SELECT id, account_id, discord_id FROM game_sessions/i.test(sql)) {
-        return [{ id: 7, account_id: 42, discord_id: '123456789' }];
-      }
-      return [];
-    };
+    queryHandler = activeSession({ id: 7, account_id: 42, discord_id: '123456789' });
 
     const res = await get(`/api/servers/${MASTER_KEY}/sessions/${SESSION}`);
     assert.equal(res.status, 200);
@@ -330,17 +339,18 @@ describe('master API de sessão (contrato do SkyMP)', () => {
   });
 
   test('a consulta exige sessão não revogada e não expirada', async () => {
-    queryHandler = () => [{ id: 1, account_id: 1, discord_id: 'x' }];
+    queryHandler = activeSession({ id: 1, account_id: 1, discord_id: 'x' });
     await get(`/api/servers/${MASTER_KEY}/sessions/${SESSION}`);
 
     const q = queryLog.find(q => /FROM game_sessions/i.test(q.sql));
     assert.ok(q, 'deveria ter consultado game_sessions');
     assert.match(q.sql, /revoked_at IS NULL/, 'sessão revogada precisa deixar de valer na hora');
     assert.match(q.sql, /expires_at > NOW\(\)/, 'sessão expirada não pode autenticar');
+    assert.match(q.sql, /resolve_count = 0/, 'sessão já consumida não pode resolver outra vez');
   });
 
   test('guarda hash, nunca o token em claro', async () => {
-    queryHandler = () => [{ id: 1, account_id: 1, discord_id: 'x' }];
+    queryHandler = activeSession({ id: 1, account_id: 1, discord_id: 'x' });
     await get(`/api/servers/${MASTER_KEY}/sessions/${SESSION}`);
 
     const q = queryLog.find(q => /FROM game_sessions/i.test(q.sql));
@@ -349,13 +359,43 @@ describe('master API de sessão (contrato do SkyMP)', () => {
   });
 
   test('contabiliza a resolução', async () => {
-    queryHandler = (sql) => /SELECT id, account_id/i.test(sql)
-      ? [{ id: 7, account_id: 42, discord_id: 'x' }] : [];
+    queryHandler = activeSession({ id: 7, account_id: 42, discord_id: 'x' });
     await get(`/api/servers/${MASTER_KEY}/sessions/${SESSION}`);
 
     // resolve_count alto é sinal de sessão compartilhada entre máquinas.
     const upd = queryLog.find(q => /UPDATE game_sessions/i.test(q.sql));
     assert.ok(upd, 'deveria registrar o uso');
     assert.match(upd.sql, /resolve_count = resolve_count \+ 1/);
+    assert.match(upd.sql, /resolve_count = 0/, 'o consumo precisa ser condicional e atômico');
+  });
+
+  test('corrida de replay perde no UPDATE atômico e não recebe identidade', async () => {
+    queryHandler = activeSession({ id: 7, account_id: 42, discord_id: 'x' }, 0);
+    const res = await get(`/api/servers/${MASTER_KEY}/sessions/${SESSION}`);
+    assert.equal(res.status, 404);
+    assert.deepEqual(await res.json(), { error: 'Session not found' });
+  });
+
+  test('confirma na game-api a conta e o id exato da sessão', async () => {
+    queryHandler = activeSession({ id: 77, account_id: 42, discord_id: 'x' });
+    let notified;
+    setSessionOccupancyNotifierForTests(async value => {
+      notified = value;
+      return { ok: true, marked: true };
+    });
+    const res = await get(`/api/servers/${MASTER_KEY}/sessions/${SESSION}`);
+    assert.equal(res.status, 200);
+    assert.deepEqual(notified, { accountId: 42, sessionId: 77 });
+  });
+
+  test('falha fechado quando a game-api não confirma a ocupação', async () => {
+    queryHandler = activeSession({ id: 7, account_id: 42, discord_id: 'x' });
+    setSessionOccupancyNotifierForTests(async () => {
+      throw new Error('game-api offline');
+    });
+
+    const res = await get(`/api/servers/${MASTER_KEY}/sessions/${SESSION}`);
+    assert.equal(res.status, 503);
+    assert.deepEqual(await res.json(), { error: 'Session service unavailable' });
   });
 });

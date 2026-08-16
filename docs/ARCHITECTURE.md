@@ -10,7 +10,7 @@ A infraestrutura é dividida nos seguintes módulos:
 
 ### 1.1 Banco de Dados (MariaDB/MySQL)
 O **MariaDB** é a fonte absoluta de verdade. Todos os serviços se conectam a ele.
-- **Tabelas Principais:** `accounts`, `characters`, `character_inventory`, `audit_logs`, `whitelist_applications`, `staff_roles`, `factions`, `holds`, `properties`, `market_stalls`, `crafting_recipes`, `crafting_ingredients`. O schema completo está em `skymp/packages/database/schema.sql` mais as migrations `v2`–`v13`, aplicadas **em ordem** (v6 = `launch_tickets`, v7 = índices das queries quentes, v8 = `game_sessions`, v9 = `characters.gold`, v10 = Afinidade da Alma, v11 = ledger de tesouros institucionais, v12 = ledger do mercado regional, v13 = idempotência de vendas em barracas).
+- **Tabelas Principais:** `accounts`, `characters`, `character_inventory`, `audit_logs`, `whitelist_applications`, `discord_role_access`, `staff_roles`, `factions`, `holds`, `properties`, `market_stalls`, `crafting_recipes`, `crafting_ingredients`. O schema completo está em `skymp/packages/database/schema.sql` mais as migrations `v2`–`v19`. `setup-db.js` e o boot as aplicam em ordem numérica sob lock, registrando nome e checksum em `schema_migrations`; v17 vincula cada candidatura ao personagem exato, v18 registra concessões verificadas pelo bot do Discord e v19 adiciona o lease exato por conexão.
 - Algumas tabelas existem no schema mas ainda não são lidas por nenhum código ativo (`store_purchases`, `trade_routes`, `magic_licenses`, `magic_violations`, `character_diseases`, `staff_permissions`) — pertencem a módulos PARKED (ver 1.4).
 - **Regra Restrita:** Nenhuma alteração de estado no jogo (dinheiro, posições, itens) acontece sem ser gravada ou lida do MariaDB. O Node.js não confia em dados soltos na memória por períodos longos sem persistência.
 
@@ -20,7 +20,7 @@ Desenvolvido em **Express.js / Node.js**.
 - Fornece ao **Launcher** a troca de OAuth do Discord (`POST /api/launcher/oauth/exchange`, que também emite o ticket de lançamento) e o recebimento de crash reports. O manifesto de mods **não** vem daqui — vem do `apps/game-api` e do GitHub Releases (ver 1.3.1 e `LAUNCHER_DISTRIBUTION.md`).
 - Autenticação obrigatória utilizando `passport-discord`.
 - Não confundir com o **Painel do Jogador in-game** (ver 1.4.2), que roda dentro do próprio HUD do SkyMP, não no navegador.
-- **Aplicação de personagem** (`/api/apply`, `apply.html`): além de nome/biografia, coleta `motivations`/`weaknesses`/`social_ties` (rubrica de whitelist Heavy RP — ver `SKYMP_RP_DEVELOPMENT_PLAN.md` 8.1). Uma heurística de palavras-chave (`detectsStrongConcept` em `server.js`) sinaliza `characters.needs_extra_review` pra conceitos fortes (nobreza, vampirismo, lycanthropia, Daedra, liderança de facção) — não é um gate automático, só um aviso pra staff prestar mais atenção na revisão; a staff pode anexar `extra_review_notes` pelo painel (`PATCH /api/whitelist/:id`). `skymp/gamemode/whitelist.js` lê `characters` com `ORDER BY id DESC LIMIT 1` ao liberar spawn.
+- **Aplicação de personagem** (`/api/apply`, `apply.html`): além de nome/biografia, coleta `motivations`/`weaknesses`/`social_ties` (rubrica de whitelist Heavy RP — ver `SKYMP_RP_DEVELOPMENT_PLAN.md` 8.1). Personagem e candidatura nascem na mesma transação MariaDB e `whitelist_applications.character_id` identifica a ficha revisada; o lock da conta serializa envios concorrentes. A revisão trava conta, candidatura e personagem nessa ordem, exige o estado anterior observado pela UI e grava mudança + auditoria antes do commit. Uma heurística de palavras-chave (`detectsStrongConcept` em `server.js`) sinaliza `characters.needs_extra_review` pra conceitos fortes (nobreza, vampirismo, lycanthropia, Daedra, liderança de facção) — não é um gate automático, só um aviso pra staff prestar mais atenção na revisão; a staff pode anexar `extra_review_notes` pelo painel (`PATCH /api/whitelist/:id`). `skymp/gamemode/whitelist.js` lê `characters` com `ORDER BY id DESC LIMIT 1` ao liberar spawn.
 
 ### 1.2.1 Master API (contrato do SkyMP, servido pelo `apps/web`)
 `GET /api/servers/:masterKey/sessions/:session` → `{ user: { id, discordId } }`
@@ -31,11 +31,19 @@ Este endpoint não foi inventado por nós: é o que o servidor SkyMP chama quand
 
 O `master` padrão do SkyMP é `https://gateway.skymp.net`; apontar para o nosso painel é trocar uma string em `server-settings.json`. `masterKey` precisa ser igual dos dois lados (`MASTER_KEY` no `.env` do painel).
 
-Sessões ficam em `game_sessions`, guardadas como hash SHA-256, com `expires_at`, `revoked_at` (ban imediato sem esperar TTL) e `resolve_count` (contagem alta sugere sessão compartilhada entre máquinas).
+Sessões ficam em `game_sessions`, guardadas como hash SHA-256, com `expires_at`, `revoked_at` e consumo único atômico por `resolve_count = 0`. A conexão recebe outro token opaco: só o hash do lease é persistido e o disconnect revoga exatamente a linha correspondente, sem poder derrubar uma reconexão posterior da mesma conta.
 
 ### 1.3 Bot do Discord (`apps/bot-discord`)
 Desenvolvido em **discord.js**.
 - Realiza a ponte entre a conta do Discord do usuário e o seu `profileId` no jogo (`POST /api/sync-role`, chamado pelo painel web na aprovação/rejeição de whitelist).
+- `WHITELIST_ROLE_ID` e os IDs opcionais de `GAME_ACCESS_ROLE_IDS` concedem
+  whitelist no sentido Discord → jogo. O launcher nunca declara roles: no OAuth,
+  o painel chama o endpoint interno do bot, que consulta o membro na guild. A
+  confirmação fica em `discord_role_access` com TTL; `guildMemberUpdate` antecipa
+  adição/remoção. Uma candidatura promovida por cargo recebe
+  `approval_source='discord_role'`; a fila e o gamemode só a aceitam enquanto a
+  concessão estiver ativa. Aprovação da staff usa `approval_source='staff'` e não
+  é revogada ao perder cargo.
 - **Canais de voz temporários** (`voiceChannels.js`, comandos `/voz-criar <nome>` e `/voz-fechar`, staff-only): alternativa prática de voz enquanto o VOIP nativo in-game (`/voz`, ver 1.4.4) depende de um patch de client ainda não aplicado (`docs/technical/VOICE_CLIENT_PATCH.md`). Canal é apagado automaticamente ~30s depois de ficar vazio. Os comandos são registrados no boot do bot (`deploy-commands.js` roda no evento `ready`); uma falha ali não derruba o bot, mas grita no log. `npm run deploy-commands` continua existindo pra rodar à mão.
 - **Log de moderação** (`moderationLog.js`, endpoint interno `POST /api/moderation-log`): posta um embed num canal configurável (`MODERATION_LOG_CHANNEL_ID`) a cada ação de moderação. Era a intenção original registrada aqui e ficou anos sem implementação; entrou em 07/08/2026.
 
@@ -60,8 +68,18 @@ Desenvolvido em **discord.js**.
 Express, porta `GAME_API_PORT` (7758) — a porta que o launcher sempre chamou e para a qual não havia servidor. Detalhes em `docs/technical/LAUNCHER_DISTRIBUTION.md`.
 - **`GET /mods.json`**: manifesto de paridade de modpack (`{mods, loadOrder}`), gerado offline por `scripts/generate-mods-manifest.js` a partir da pasta `Data/` de referência. Manifesto ausente ou corrompido responde **503**, nunca lista vazia — lista vazia passaria na verificação do launcher e deixaria qualquer modpack entrar.
 - **Fila** (`POST /api/queue/join`, `POST /api/queue/status`): capacidade fixa, FIFO, com expiração de reserva pra que quem fecha o launcher depois de admitido não segure o slot para sempre. Autenticada por ticket de uso único emitido pelo painel (`launch_tickets`, migration v6) — `discordId` é público e não serve como prova de identidade.
-- **Sessão de jogo**: ao admitir alguém, grava uma linha em `game_sessions` (migration v8) e devolve o token ao launcher, que o escreve como `session` no `skymp_config.json`. É esse token que o servidor SkyMP resolve contra o master API (ver 1.2.1) — é assim que a identidade deixa de ser uma declaração do cliente.
-- **`POST /internal/session/resolve` / `/release`** (`X-Internal-Secret`): liberação de slot na desconexão. O `resolve` virou redundante depois que o caminho nativo de sessão passou a existir — mantido só enquanto o teste in-game não confirma o fluxo do master API.
+- **Sessão de jogo**: ao admitir alguém, grava uma linha em `game_sessions` (migration v8) e devolve o token ao launcher, que o escreve em `skymp5-client-settings.txt` como `gameData.session`. O patch registrado `launcher-session-settings-auth` transforma esse campo em `AuthGameData.remote`; o cliente envia a sessão e o servidor SkyMP a resolve contra o master API (ver 1.2.1). Detalhes em `technical/AUTH_003_LAUNCHER_SESSION_HANDOFF.md`.
+- **Retenção de credenciais**: `launch_tickets` e `game_sessions` vencidos são removidos pela game-api em lotes limitados, no boot e oportunisticamente durante tráfego de fila. A política usa `expires_at` e os índices MariaDB existentes; não há timer permanente.
+- **Recuperação da fila**: a game-api reidrata contas conectadas e reservas recentes a partir de `game_sessions` antes de abrir a porta, incluindo `sessionId` e hash do lease, nunca o token em claro. O master confirma a sessão exata; falha nessa confirmação recusa o login.
+- **`POST /internal/session/resolve` / `/connected` / `/claim` / `/release`** (`X-Internal-Secret`): o master usa `/connected` com conta e sessão; o gamemode usa `/claim` antes da whitelist e `/release` no cleanup. O `release` recebe apenas o lease opaco, não `accountId`. O `resolve` legado permanece até o teste in-game confirmar o fluxo nativo.
+- **Operação**: `GET /health` é liveness mínimo; `GET /ready` exige MariaDB,
+  manifesto e ausência de manutenção; `GET /status` publica apenas estado e
+  contagens agregadas. `MAINTENANCE_MODE=true` recusa join/poll sem gastar o
+  ticket e usa `MAINTENANCE_MESSAGE` como texto visível.
+- **Apresentação no launcher**: o processo principal consulta `/status`, valida
+  e reduz a resposta antes de atravessar o IPC. A Home diferencia `online`,
+  `full`, `starting`, `maintenance` e indisponibilidade local, atualizando a
+  cada 15 segundos sem sobrepor requisições.
 
 ### 1.4 Servidor Nativo SkyMP (Gamemode)
 Localizado em `skymp/gamemode/`.
@@ -98,7 +116,13 @@ Três módulos `core/` que formam o pipeline de ações contextuais — o menu d
 
 ⚠️ **Nunca rodou numa sessão real** — 96 testes verdes, zero jogadores. Mesmo peso que *"ninguém ouviu ainda"* tem na voz (1.4.4). A CEF foi reescrita para `interaction:*` e passa em `node --check`; nenhuma linha dela rodou dentro de um CEF.
 
-Desde 11/08/2026, `core/ui-event-gateway.js` possui o callback global e valida o envelope antes de rotear; `core/ui-event-rate-limiter.js` mede e, quando configurado, limita volume por ator e tipo. `core/connection-monitor.js` controla polling, reconexão e invalidação de respostas antigas da whitelist. Credenciais opacas são geradas, hasheadas e redigidas por `core/opaque-credential.js`. Na economia, `core/institutional-treasury-service.js` e `core/regional-market-transaction-service.js` executam saldo, estoque e ledger na mesma transação; a migration v13 torna retries de barracas idempotentes. Essas fronteiras estão testadas, mas os módulos PARKED continuam fora do boot.
+Desde 11/08/2026, `core/ui-event-gateway.js` possui o callback global e valida o envelope antes de rotear; `core/ui-event-rate-limiter.js` mede e, quando configurado, limita volume por ator e tipo. Desde 16/08/2026, `core/connection-monitor.js` usa eventos nativos, retry apenas por sessão pendente e invalidação por sessão/GUID; o boot valida auth config, conexão MariaDB e readiness dos módulos core antes de instalar o runtime. Credenciais opacas são geradas, hasheadas e redigidas por `core/opaque-credential.js`. Na economia, `core/institutional-treasury-service.js` e `core/regional-market-transaction-service.js` executam saldo, estoque e ledger na mesma transação; a migration v13 torna retries de barracas idempotentes. Essas fronteiras estão testadas, mas os módulos PARKED continuam fora do boot.
+
+O catálogo administrativo atual possui fonte única em
+`skymp/packages/staff-access-policy.js`, consumida pelo gamemode e pelo painel.
+No painel, cargo ausente ou desconhecido falha fechado; whitelist exige
+`manage_whitelist`, enquanto dashboard, auditoria e crash reports exigem
+`view_audit`. `vip_level` e cargos Discord nunca concedem autoridade de staff.
 
 #### 1.4.2 Painel do Jogador (in-game)
 `player-panel-service.js` — módulo `player-panel` (`ENABLE_PLAYER_PANEL_SERVICE`), ativado pelo comando `/painel`. Não duplica lógica de negócio: só agrega leituras de outros serviços já existentes.

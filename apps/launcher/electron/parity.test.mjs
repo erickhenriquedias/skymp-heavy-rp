@@ -172,6 +172,23 @@ describe('comparação com o manifesto do servidor', () => {
     assert.match(r.error, /modificado ou corrompido/);
   });
 
+  it('retorna todas as divergências em uma única verificação', () => {
+    const r = compareMods({
+      serverMods: [
+        { filename: 'Faltando.esp', hash: 'h9' },
+        { filename: 'C.esp', hash: 'h3' },
+        { filename: 'Outro.bsa', hash: 'h4' }
+      ],
+      localFiles: ['C.esp'],
+      hashOf
+    });
+    assert.equal(r.success, false);
+    assert.equal(r.problems.length, 3);
+    assert.match(r.problems[0], /Faltando\.esp/);
+    assert.match(r.problems[1], /C\.esp.*corrompido/);
+    assert.match(r.problems[2], /Outro\.bsa/);
+  });
+
   it('manifesto inválido reprova em vez de aprovar por omissão', () => {
     // Lista vazia passaria em qualquer laco. Se o servidor mandar lixo, a
     // resposta segura e "nao", nunca "sim".

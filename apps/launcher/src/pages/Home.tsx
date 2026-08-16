@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import type { AuthData } from '../types/electron';
+import type { AuthData, PublicServerStatus } from '../types/electron';
 import { Play, Settings as SettingsIcon, LogOut } from 'lucide-react';
 
 interface HomeProps {
@@ -9,11 +9,28 @@ interface HomeProps {
 }
 
 const QUEUE_POLL_INTERVAL_MS = 4000;
+const SERVER_STATUS_INTERVAL_MS = 15000;
+const INITIAL_SERVER_STATUS: PublicServerStatus = {
+  state: 'starting',
+  players: 0,
+  capacity: 0,
+  queue: 0,
+  message: 'Consultando o servidor...',
+};
+
+const SERVER_STATUS_VIEW = {
+  online: { label: 'Online', color: 'var(--success)' },
+  full: { label: 'Lotado', color: 'var(--accent-gold)' },
+  starting: { label: 'Inicializando', color: 'var(--accent-gold)' },
+  maintenance: { label: 'Manutenção', color: 'var(--accent-gold)' },
+  offline: { label: 'Offline', color: 'var(--error)' },
+} as const;
 
 export function Home({ auth, setAuth }: HomeProps) {
   const navigate = useNavigate();
   const [isPlaying, setIsPlaying] = useState(false);
   const [status, setStatus] = useState<string>('');
+  const [serverStatus, setServerStatus] = useState<PublicServerStatus>(INITIAL_SERVER_STATUS);
   const queuePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const stopQueuePolling = () => {
@@ -24,7 +41,30 @@ export function Home({ auth, setAuth }: HomeProps) {
   };
 
   useEffect(() => {
-    return () => stopQueuePolling();
+    let active = true;
+    let refreshPending = false;
+    const refreshServerStatus = async () => {
+      if (refreshPending) return;
+      refreshPending = true;
+      try {
+        const next = await window.electronAPI.getServerStatus();
+        if (active) setServerStatus(next);
+      } catch {
+        if (active) setServerStatus({
+          state: 'offline', players: 0, capacity: 0, queue: 0,
+          message: 'Não foi possível consultar o servidor.',
+        });
+      } finally {
+        refreshPending = false;
+      }
+    };
+    void refreshServerStatus();
+    const statusTimer = setInterval(refreshServerStatus, SERVER_STATUS_INTERVAL_MS);
+    return () => {
+      active = false;
+      clearInterval(statusTimer);
+      stopQueuePolling();
+    };
   }, []);
 
   const startQueuePolling = (gamePath: string) => {
@@ -59,6 +99,10 @@ export function Home({ auth, setAuth }: HomeProps) {
   };
 
   const handlePlay = async () => {
+    if (serverStatus.state === 'maintenance' || serverStatus.state === 'starting' || serverStatus.state === 'offline') {
+      setStatus(serverStatus.message || 'Servidor indisponível no momento.');
+      return;
+    }
     setIsPlaying(true);
     setStatus('Verificando pasta do jogo...');
     try {
@@ -82,7 +126,14 @@ export function Home({ auth, setAuth }: HomeProps) {
       setStatus('Validando mods com o servidor...');
       const verify = await window.electronAPI.verifyMods(gamePath);
       if (!verify.success) {
-        setStatus(`Mods invalidos: ${verify.error || 'verificacao falhou'}`);
+        const problems = Array.isArray(verify.problems) ? verify.problems : [];
+        const visible = problems.slice(0, 3).join(' · ');
+        const remaining = Math.max(0, problems.length - 3);
+        setStatus(
+          problems.length > 0
+            ? `Mods inválidos (${problems.length}): ${visible}${remaining > 0 ? ` · e mais ${remaining}` : ''}`
+            : `Mods inválidos: ${verify.error || 'verificação falhou'}`
+        );
         return;
       }
 
@@ -114,6 +165,12 @@ export function Home({ auth, setAuth }: HomeProps) {
       setIsPlaying(false);
     }
   };
+
+  const serverView = SERVER_STATUS_VIEW[serverStatus.state];
+  const cannotJoin = ['maintenance', 'starting', 'offline'].includes(serverStatus.state);
+  const population = serverStatus.capacity > 0
+    ? `${serverStatus.players}/${serverStatus.capacity} jogadores${serverStatus.queue > 0 ? ` · ${serverStatus.queue} na fila` : ''}`
+    : serverStatus.message;
 
   return (
     <div className="page-container" style={{ position: 'relative' }}>
@@ -154,20 +211,20 @@ export function Home({ auth, setAuth }: HomeProps) {
         }}>
           <h2 style={{ fontSize: '16px', color: 'var(--text-muted)', marginBottom: '16px', textTransform: 'uppercase' }}>Status do Servidor</h2>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', marginBottom: '8px' }}>
-            <div style={{ width: '12px', height: '12px', borderRadius: '50%', backgroundColor: 'var(--success)' }} />
-            <span style={{ fontSize: '20px', fontWeight: 600 }}>Online</span>
+            <div style={{ width: '12px', height: '12px', borderRadius: '50%', backgroundColor: serverView.color }} />
+            <span style={{ fontSize: '20px', fontWeight: 600 }}>{serverView.label}</span>
           </div>
-          <p style={{ color: 'var(--text-muted)' }}>Mods validados automaticamente</p>
+          <p style={{ color: 'var(--text-muted)' }}>{population}</p>
         </div>
 
         <button
           className="btn-primary"
           style={{ width: '100%', maxWidth: '400px', padding: '20px', fontSize: '24px' }}
           onClick={handlePlay}
-          disabled={isPlaying}
+          disabled={isPlaying || cannotJoin}
         >
           <Play size={28} />
-          {isPlaying ? 'AGUARDE' : 'JOGAR'}
+          {isPlaying ? 'AGUARDE' : serverStatus.state === 'full' ? 'ENTRAR NA FILA' : 'JOGAR'}
         </button>
 
         {status && <p style={{ color: 'var(--accent-gold)', textAlign: 'center', maxWidth: '620px' }}>{status}</p>}

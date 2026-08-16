@@ -16,6 +16,7 @@ Focada em *Roleplay Estrito*: autoridade do servidor sobre economia, identidade 
 |---|---|
 | Entender o que o projeto **quer ser** | [CONSTITUICAO.md](docs/CONSTITUICAO.md) — a constituição de design |
 | Entender o estado real do projeto | [QA_REPORT_2026-08.md](docs/technical/QA_REPORT_2026-08.md) — inclui o que **não** está pronto |
+| Ver todas as validações pendentes | [README_PENDENCIAS_DE_TESTE.md](../README_PENDENCIAS_DE_TESTE.md) — checklist consolidado e critérios de evidência |
 | Entender como as peças conversam | [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | Contribuir com código | [CONTRIBUTING.md](CONTRIBUTING.md) — as regras que não são óbvias lendo o código |
 | Saber se um mod funciona no servidor | [MODS_AND_GAMEMODE_CONTRACT.md](docs/technical/MODS_AND_GAMEMODE_CONTRACT.md) §4 |
@@ -38,21 +39,24 @@ Focada em *Roleplay Estrito*: autoridade do servidor sobre economia, identidade 
 
 - **Afinidade da Alma**: `core/soul.js` contém o domínio puro (28 testes), enquanto `soul-service.js` persiste almas, entrega sinais, grava marcas, avança árvores e expõe `/alma`. O serviço está registrado atrás de `ENABLE_SOUL_SERVICE`, desligado por padrão e ainda aguarda homologação in-game. Desenho em [SOUL_AFFINITY.md](docs/design/SOUL_AFFINITY.md).
 
-- **Fronteiras de confiança e ciclo de conexão**: eventos CEF passam por envelope validado, gateway único e rate limiter observável (`ui-event-gateway`, `ui-event-rate-limiter`); conexões e reconexões passam por `connection-monitor`, que invalida respostas assíncronas antigas. Credenciais opacas têm geração, hashing e redação centralizados em `core/opaque-credential.js`.
+- **Fronteiras de confiança e ciclo de conexão**: eventos CEF passam por envelope validado, gateway único e rate limiter observável (`ui-event-gateway`, `ui-event-rate-limiter`); conexões online passam pelo master e por um lease opaco exato antes da whitelist. O `connection-monitor` invalida respostas assíncronas antigas e substitui conexão duplicada da mesma conta sem permitir que o disconnect velho derrube a nova.
 
 - **Economia transacional**: transferências entre tesouros e compras/vendas regionais usam transações, ledger e chaves de idempotência (`institutional-treasury-service`, `regional-market-transaction-service`, migrations v11–v12). Compras em barracas aceitam `requestId` e impedem cobrança duplicada via migration v13. A economia regional continua PARKED; as fronteiras já estão implementadas e testadas para uma futura ativação segura.
 
-- **API do Jogo (`apps/game-api`)**: serve a porta 7758 que o launcher sempre chamou e que não existia — `/mods.json` (paridade de modpack, a base do contrato de FormID) e a fila de entrada com capacidade e expiração de reserva. A fila é autenticada por ticket emitido pelo painel, nunca pelo `discordId` que o cliente informa. Manifesto gerado por `scripts/generate-mods-manifest.js`.
+- **API do Jogo (`apps/game-api`)**: serve `/mods.json`, fila e ciclo de sessão. A fila é autenticada por ticket emitido pelo painel, nunca pelo `discordId` do cliente; sessões do master são consumidas atomicamente uma vez e o gamemode usa lease por conexão, persistido somente como hash.
 
-> ⚠️ **O servidor ainda não foi validado com jogadores reais.** Todo o gamemode está verificado só por teste unitário com `mp` mockado — o próximo passo é rodar o [plano de teste in-game](docs/technical/GOVERNANCE_MARKET_STALLS_TEST_PLAN.md) com as flags `ENABLE_*` ligadas. Continua aberto também que o gamemode ainda deriva identidade do `profileId` do cliente em vez de validar o ticket de sessão. Plano completo em [QA_REPORT_2026-08.md](docs/technical/QA_REPORT_2026-08.md) §3.
+> ⚠️ **O servidor ainda não foi validado com jogadores reais.** Todo o gamemode está verificado só por teste unitário com `mp` mockado — o próximo passo é rodar o [checklist consolidado](../README_PENDENCIAS_DE_TESTE.md). Em modo online, `profileId` vem do master; o que continua aberto é comprovar a cadeia e os leases em runtime com MariaDB e dois clientes reais.
 
 ## Como Executar o Servidor (Desenvolvimento)
 
 Para facilitar a vida dos desenvolvedores, criamos um script de orquestração automatizado que inicia todas as dependências em terminais paralelos.
 
 1. Inicie o seu servidor local de banco de dados (MariaDB/MySQL).
-2. Navegue até a pasta `scripts/phase0/`.
-3. Execute o script `Start-AllServices.ps1` com o PowerShell.
+2. No primeiro uso, execute `cd skymp/gamemode; npm run db:setup`. O comando
+   cria o schema e aplica v2–v19 em ordem; nos boots seguintes, o servidor
+   valida/aplica somente versões pendentes antes de liberar os módulos.
+3. Navegue até a pasta `scripts/phase0/`.
+4. Execute o script `Start-AllServices.ps1` com o PowerShell.
 
 Isso irá despachar simultaneamente:
 - O Painel Web do Staff (`apps/web`, porta 3001)

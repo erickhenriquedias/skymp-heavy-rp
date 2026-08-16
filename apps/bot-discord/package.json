@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node --test voiceChannels.test.js deployCommands.test.js moderationLog.test.js",
+    "test": "node --test voiceChannels.test.js deployCommands.test.js moderationLog.test.js gameAccess.test.js",
     "deploy-commands": "node deploy-commands.js"
   },
   "keywords": [],

@@ -268,8 +268,8 @@ O que a `mp` de fato oferece, conforme `types/mp.d.ts` (procedência marcada lá
 | `mp.getActorsByProfileId(profileId)` | ✅ `[DOC]` |
 | `mp.get/set(actorId, prop)` — posição, célula | ✅ `[DOC]` |
 | `mp.callPapyrusFunction`, `mp.triggerClient` | ✅ |
-| Evento de conexão/desconexão | ❌ — `connection-monitor.js` faz **polling** a cada 2 s sobre `userId` 0..10 |
-| Lista de jogadores online | ❌ — derivada do polling acima |
+| Evento de conexão/desconexão | ✅ — `mp.on('connect'|'disconnect')`, confirmado no C++/TS do pin atual |
+| Lista de jogadores online | ❌ — o monitor mantém índice próprio a partir dos eventos e faz só uma reconciliação inicial por `maxPlayers` |
 | **Ping / latência** | ❌ não existe na API |
 | **Mute / freeze / spectate** | ❌ não existem; teriam de ser construídos sobre Papyrus + `triggerClient` |
 
@@ -278,9 +278,9 @@ parágrafo que cumpre isso: **kick e teleport são reais; ping, mute, freeze e
 spectate não existem** e entram no painel só depois de alguém construí-los em
 jogo e observá-los numa sessão real.
 
-Nota de escala: `maxUserId` padrão do monitor é **10**. Um servidor com mais de
-10 conectados hoje não enxerga os demais — é configurável, mas o padrão é de
-laboratório, não de produção.
+Atualização de 16/08/2026: o limite `maxUserId=10` foi removido. Conexões novas
+entram por evento independentemente do número do slot; no start, uma única
+reconciliação usa o `maxPlayers` efetivo de `mp.getServerSettings()`.
 
 ### 4.9 🟡 Sessão web em `MemoryStore`, sem CSRF explícito e sem CSP
 
@@ -302,11 +302,13 @@ sistemática. Não há `helmet` nem CSP.
 `status = 'banned'` que tenha linha em `staff_roles` continua entrando no painel:
 o ban bloqueia o **jogo** (`whitelist.js`, `game-api`), não o **painel**.
 
-### 4.11 🔵 Rate limit em memória, sem poda
+### 4.11 ✅ Rate limit em memória com poda e teto
 
-`rateLimitBuckets` (nos três serviços) nunca remove chaves. Cada IP novo é uma
-entrada permanente até o restart. Não é exploit interessante — é crescimento
-silencioso que ninguém vai notar até virar problema de memória.
+**Corrigido em 16/08/2026.** Painel, bot e game-api usam agora o módulo
+compartilhado `skymp/packages/sliding-rate-limiter.js`. Buckets expirados são
+removidos por sweep oportunista, cada processo aceita no máximo 50.000 chaves e
+requisições já bloqueadas não aumentam o array da chave. O teste de flood HTTP
+real e a medição de heap continuam como validação operacional.
 
 ### 4.12 🔵 `PATCH /api/whitelist/:id` responde `ok:true` para aplicação inexistente
 

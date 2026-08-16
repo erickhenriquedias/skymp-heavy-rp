@@ -60,9 +60,8 @@ if (-not (Test-Path -LiteralPath $manifestPath)) {
   Write-Host ""
 }
 
-# Banco meio-migrado nao impede o boot: o servidor sobe, o login passa, e so a
-# query que toca a coluna faltante quebra -- as vezes semanas depois, numa cena,
-# com ouro no meio. Melhor descobrir aqui.
+# O boot agora aplica migrations antes dos modulos e falha fechado. Este check
+# continua util como diagnostico antecipado, antes de abrir as janelas.
 $gamemodeDir = Join-Path $rootDir "skymp\gamemode"
 if (Test-Path -LiteralPath (Join-Path $gamemodeDir "node_modules")) {
   Push-Location $gamemodeDir

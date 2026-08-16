@@ -143,3 +143,94 @@ describe('fila — status de quem nunca entrou', () => {
     assert.equal(q.status(123, makeTicket).status, 'not_queued');
   });
 });
+
+describe('fila — recuperação após restart', () => {
+  test('restaura ocupação conectada sem precisar do token em claro', () => {
+    const q = createQueue({ capacity: 2 });
+    assert.equal(q.restoreAdmissions([
+      { accountId: 1, discordId: 'd1', reservedAt: Date.now(), connected: true }
+    ]), 1);
+    assert.deepEqual(q.snapshot(), { capacity: 2, occupied: 1, connected: 1, waiting: 0 });
+    assert.equal(q.resolveSessionTicket('qualquer-token'), null);
+  });
+
+  test('restaura acima da capacidade e falha fechado para novas contas', () => {
+    const q = createQueue({ capacity: 1 });
+    q.restoreAdmissions([
+      { accountId: 1, discordId: 'd1', reservedAt: Date.now(), connected: true },
+      { accountId: 2, discordId: 'd2', reservedAt: Date.now(), connected: true }
+    ]);
+    assert.equal(q.join(3, 'd3', makeTicket).status, 'queued');
+    assert.equal(q.snapshot().occupied, 2);
+  });
+
+  test('reconnect da mesma conta troca estado recuperado por ticket novo sem outro slot', () => {
+    const q = createQueue({ capacity: 1 });
+    q.restoreAdmissions([
+      { accountId: 1, discordId: 'd1', reservedAt: Date.now(), connected: true }
+    ]);
+    const result = q.join(1, 'd1', makeTicket);
+    assert.equal(result.status, 'success');
+    assert.ok(result.ticket);
+    assert.equal(q.snapshot().occupied, 1);
+    assert.equal(q.snapshot().connected, 0);
+  });
+
+  test('falha ao persistir reconnect restaura a ocupação e o lease anteriores', () => {
+    const q = createQueue({ capacity: 1 });
+    q.restoreAdmissions([{
+      accountId: 1, discordId: 'd1', reservedAt: Date.now(), connected: true,
+      sessionId: 10, leaseHash: 'a'.repeat(64)
+    }]);
+    const reconnect = q.join(1, 'd1', makeTicket);
+    assert.equal(q.snapshot().connected, 0);
+    assert.equal(q.restoreSuperseded(1, reconnect.ticket), true);
+    assert.equal(q.snapshot().connected, 1);
+    assert.equal(q.releaseByLeaseHash('a'.repeat(64)), true);
+    assert.equal(q.snapshot().occupied, 0);
+  });
+
+  test('polling também renova reserva recuperada sem devolver ticket nulo', () => {
+    const q = createQueue({ capacity: 1 });
+    q.restoreAdmissions([
+      { accountId: 1, discordId: 'd1', reservedAt: Date.now(), connected: false }
+    ]);
+    const result = q.status(1, makeTicket);
+    assert.equal(result.status, 'success');
+    assert.equal(typeof result.ticket, 'string');
+    assert.equal(q.snapshot().occupied, 1);
+  });
+
+  test('reserva recuperada vencida é removida pelo TTL original', () => {
+    const clock = makeClock();
+    const q = createQueue({ capacity: 1, reservationTtlMs: 1000, now: clock.now });
+    q.restoreAdmissions([
+      { accountId: 1, discordId: 'd1', reservedAt: clock.now() - 1001, connected: false }
+    ]);
+    assert.equal(q.snapshot().occupied, 0);
+  });
+
+  test('conjunto inválido não publica recuperação parcial', () => {
+    const q = createQueue({ capacity: 2 });
+    assert.throws(() => q.restoreAdmissions([
+      { accountId: 1, discordId: 'd1', reservedAt: Date.now(), connected: true },
+      { accountId: 1, discordId: 'd1', reservedAt: Date.now(), connected: true }
+    ]), /duplicado/);
+    assert.equal(q.snapshot().occupied, 0);
+  });
+
+  test('lease duplicado na recuperação falha sem publicar estado parcial', () => {
+    const q = createQueue({ capacity: 2 });
+    assert.throws(() => q.restoreAdmissions([
+      {
+        accountId: 1, discordId: 'd1', reservedAt: Date.now(), connected: true,
+        sessionId: 10, leaseHash: 'a'.repeat(64)
+      },
+      {
+        accountId: 2, discordId: 'd2', reservedAt: Date.now(), connected: true,
+        sessionId: 20, leaseHash: 'a'.repeat(64)
+      }
+    ]), /lease duplicado/);
+    assert.equal(q.snapshot().occupied, 0);
+  });
+});

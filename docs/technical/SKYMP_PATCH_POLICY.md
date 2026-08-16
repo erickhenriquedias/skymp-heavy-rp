@@ -4,7 +4,7 @@ Data: **2026-08-14**. Substitui a política que vivia dentro de [`patches/README
 
 **Este documento decide *se* um patch deve existir. O `patches/README.md` explica *como* registrá-lo.**
 
-Estado atual: **nenhum patch registrado**, e é a situação preferida.
+Estado atual: **um patch registrado**, `launcher-session-settings-auth`, para o handoff de sessão externa e redaction do bearer no log. A condição de remoção está no manifesto; zero patches continua sendo o estado preferido.
 
 ---
 

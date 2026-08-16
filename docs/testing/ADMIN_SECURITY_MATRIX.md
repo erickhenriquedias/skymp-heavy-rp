@@ -122,7 +122,7 @@ declaradas e nenhuma linha de código as verifica.
 | **API interna exposta** | 🟢 `X-Internal-Secret` em tempo constante; bot escuta em `127.0.0.1` | teste existente cobre 401 sem segredo |
 | **WebSocket auth** | 🟡 só o de voz existe; painel não usa WS | se a ponte usar WS: autenticar no handshake, testar rejeição |
 | **Adulteração de auditoria** | 🔴 usuário SQL único com DML completa | §5 |
-| **Admin API exposta** | 🟡 `GET /health` do `game-api` é público (só agregados, sem identidade) | manter agregado; teste que falha se identidade vazar |
+| **Admin API exposta** | 🟢 `GET /health` do `game-api` é público e devolve somente `{ ok: true }`; contagens agregadas ficam em `/status` | manter os contratos separados; testes falham se fila, manifesto, checks internos ou identidade vazarem |
 | **Enumeração por resposta** | 🟡 `403` não diz qual permissão faltou (correto); mas `ok:true` genérico atrapalha | padronizar corpo de erro + teste |
 
 ---

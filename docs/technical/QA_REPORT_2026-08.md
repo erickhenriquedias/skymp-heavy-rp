@@ -52,7 +52,15 @@ Consequência: todos caíam no fallback vazio/`127.0.0.1`. Login do Discord impo
 
 `PATCH /api/whitelist/:id` fazia `UPDATE characters SET status='approved'` juntando por conta, **sem filtrar por status**. Um jogador que levasse `/permakill` (`status='retired'`), criasse ficha nova e fosse aprovado tinha o personagem aposentado revertido para `approved` — desfazendo a consequência e apagando o efeito do audit log.
 
-**Corrigido:** `AND c.status='pending'` no `UPDATE` (e no de `extra_review_notes`).
+**Corrigido inicialmente:** `AND c.status='pending'` impediu a ressurreição direta.
+
+**Correção estrutural em 16/08/2026:** a migration v17 adicionou
+`whitelist_applications.character_id`. Envio e revisão agora usam transações
+MariaDB, locks InnoDB e atualizam somente a ficha vinculada. Personagem
+`retired` falha fechado. A UI envia `expected_status`; se dois revisores
+disputarem a mesma candidatura, o segundo recebe conflito em vez de sobrescrever
+silenciosamente a decisão do primeiro. Falha ao inserir a candidatura ou a
+auditoria causa rollback de todo o fluxo.
 
 ### 2.4 🟠 `.env` fora do `.gitignore` em dois apps — *corrigido*
 

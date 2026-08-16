@@ -9,6 +9,18 @@ const mysql   = require('mysql2/promise');
 const cors    = require('cors');
 const passport = require('passport');
 const DiscordStrategy = require('passport-discord').Strategy;
+const {
+  WhitelistWorkflowError,
+  submitWhitelistApplication,
+  reviewWhitelistApplication
+} = require('./whitelist-workflow');
+const {
+  verifyDiscordRoleAccess,
+  persistDiscordRoleAccess
+} = require('./discord-role-access');
+const { createStaffGuard } = require('./staff-access');
+const { createSlidingWindowRateLimiter } = require('../../skymp/packages/sliding-rate-limiter');
+const { notifySessionConnected } = require('./session-occupancy-notifier');
 
 const app  = express();
 const PORT = process.env.PANEL_PORT || 3001;
@@ -16,6 +28,7 @@ const INTERNAL_API_SECRET = requireEnv('INTERNAL_API_SECRET');
 // O bot escuta em 127.0.0.1 (ver apps/bot-discord/index.js). Configurável porque
 // nem sempre painel e bot rodam no mesmo host.
 const BOT_INTERNAL_URL = process.env.BOT_INTERNAL_URL || 'http://127.0.0.1:3002';
+const GAME_API_INTERNAL_URL = process.env.GAME_API_INTERNAL_URL || 'http://127.0.0.1:7758';
 // Allowlist dos redirect_uri aceitos em /api/launcher/oauth/exchange. O launcher
 // sobe um servidor de callback local em 127.0.0.1:19847 (ver electron/main.ts).
 const LAUNCHER_REDIRECT_URIS = (process.env.LAUNCHER_REDIRECT_URIS || 'http://localhost:19847/callback,http://127.0.0.1:19847/callback')
@@ -26,6 +39,22 @@ const CRASH_REPORT_DIR = path.join(__dirname, 'crash-reports');
 // Identifica o servidor de jogo no contrato de master API do SkyMP. Precisa
 // bater com `masterKey` do skymp/config/server-settings.*.json.
 const MASTER_KEY = process.env.MASTER_KEY || null;
+const DISCORD_ROLE_ACCESS_TTL_SECONDS = Math.max(
+  60,
+  Math.min(86400, Number(process.env.DISCORD_ROLE_ACCESS_TTL_SECONDS) || 43200)
+);
+
+let sessionOccupancyNotifier = ({ accountId, sessionId }) => notifySessionConnected({
+  baseUrl: GAME_API_INTERNAL_URL,
+  internalSecret: INTERNAL_API_SECRET,
+  accountId,
+  sessionId
+});
+
+function setSessionOccupancyNotifierForTests(notifier) {
+  if (typeof notifier !== 'function') throw new TypeError('notifier deve ser função');
+  sessionOccupancyNotifier = notifier;
+}
 
 /** Comparação em tempo constante, tolerante a tamanhos diferentes. */
 function safeEquals(a, b) {
@@ -60,6 +89,21 @@ const db = async (sql, params = []) => {
   return rows;
 };
 
+async function refreshDiscordRoleAccess(accountId, discordId) {
+  const access = await verifyDiscordRoleAccess({
+    botInternalUrl: BOT_INTERNAL_URL,
+    internalSecret: INTERNAL_API_SECRET,
+    discordId
+  });
+  return persistDiscordRoleAccess(pool, {
+    accountId,
+    discordId,
+    eligible: access.eligible,
+    matchedRoleId: access.matchedRoleId,
+    ttlSeconds: DISCORD_ROLE_ACCESS_TTL_SECONDS
+  });
+}
+
 const fsp = fs.promises;
 
 async function ensureCrashReportDir() {
@@ -67,13 +111,9 @@ async function ensureCrashReportDir() {
 }
 
 // ── Rate limiting simples (janela deslizante em memória) ────────────────────
-const rateLimitBuckets = new Map();
+const rateLimiter = createSlidingWindowRateLimiter();
 function isRateLimited(key, maxRequests, windowMs) {
-  const now = Date.now();
-  const timestamps = (rateLimitBuckets.get(key) || []).filter((t) => now - t < windowMs);
-  timestamps.push(now);
-  rateLimitBuckets.set(key, timestamps);
-  return timestamps.length > maxRequests;
+  return rateLimiter.isLimited(key, maxRequests, windowMs);
 }
 
 function sanitizeCrashText(value, maxLength) {
@@ -149,7 +189,13 @@ passport.use(new DiscordStrategy({
             accountId = rows[0].account_id;
             await pool.execute('UPDATE discord_identities SET username = ?, avatar = ? WHERE discord_id = ?', [profile.username, profile.avatar || '', profile.id]);
         }
-        
+
+        try {
+            await refreshDiscordRoleAccess(accountId, profile.id);
+        } catch (roleError) {
+            console.error(`[discord-role-access] Falha ao verificar ${profile.id}: ${roleError.message}`);
+        }
+
         return done(null, { id: profile.id, username: profile.username, avatar: profile.avatar, accountId });
     } catch(err) {
         return done(err, null);
@@ -164,18 +210,9 @@ function requireAuth(req, res, next) {
 // A autoridade de staff é derivada EXCLUSIVAMENTE da tabela `staff_roles`.
 // O campo `vip_level` em `accounts` é SOMENTE para monetização (VIP/Apoiador).
 // NUNCA usar vip_level como critério de permissão administrativa.
-async function requireStaff(req, res, next) {
-  if (!req.isAuthenticated || !req.isAuthenticated()) return res.status(401).json({ error: 'Nao autenticado' });
-  try {
-    const rows = await db('SELECT role FROM staff_roles WHERE account_id = ? LIMIT 1', [req.user.accountId]);
-    if (rows.length === 0) return res.status(403).json({ error: 'Acesso staff negado' });
-    req.staff = { role: rows[0].role };
-    return next();
-  } catch (err) {
-    console.error('[requireStaff]', err);
-    return res.status(500).json({ error: 'Erro interno do servidor' });
-  }
-}
+const requireStaff = createStaffGuard(db);
+const requireWhitelistPermission = createStaffGuard(db, 'manage_whitelist');
+const requireAuditPermission = createStaffGuard(db, 'view_audit');
 
 app.get('/api/auth/discord', passport.authenticate('discord'));
 app.get('/api/auth/discord/callback', passport.authenticate('discord', {
@@ -189,6 +226,42 @@ app.post('/api/auth/logout', (req, res) => {
     if(err) { console.error('[logout]', err); return res.status(500).json({ error: 'Erro interno do servidor' }); }
     req.session.destroy(() => res.json({ ok: true }));
   });
+});
+
+// Atualização enviada pelo bot quando um cargo elegível é adicionado/removido.
+// A rota é interna e nunca aceita accountId do chamador: resolve pelo Discord
+// já vinculado no banco.
+app.post('/internal/discord-role-access', async (req, res) => {
+  if (!safeEquals(req.get('X-Internal-Secret'), INTERNAL_API_SECRET)) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  const discordId = String((req.body || {}).discord_id || '');
+  const eligible = (req.body || {}).eligible;
+  const matchedRoleId = (req.body || {}).matched_role_id;
+  if (!/^\d{5,32}$/.test(discordId) || typeof eligible !== 'boolean') {
+    return res.status(400).json({ error: 'Payload inválido' });
+  }
+  if (matchedRoleId != null && typeof matchedRoleId !== 'string') {
+    return res.status(400).json({ error: 'matched_role_id inválido' });
+  }
+  try {
+    const rows = await db(
+      'SELECT account_id FROM discord_identities WHERE discord_id = ? LIMIT 1',
+      [discordId]
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'Discord não vinculado' });
+    const result = await persistDiscordRoleAccess(pool, {
+      accountId: rows[0].account_id,
+      discordId,
+      eligible,
+      matchedRoleId: matchedRoleId || null,
+      ttlSeconds: DISCORD_ROLE_ACCESS_TTL_SECONDS
+    });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error('[/internal/discord-role-access]', err);
+    res.status(500).json({ error: 'Erro interno do servidor' });
+  }
 });
 
 // Rotas do Jogador Público
@@ -260,31 +333,22 @@ app.post('/api/apply', requireAuth, async (req, res) => {
     if (validationError) return res.status(400).json({ error: validationError });
     const { first_name, last_name, biography, motivations, weaknesses, social_ties } = clean;
     try {
-        const existing = await db('SELECT status FROM whitelist_applications WHERE account_id = ? ORDER BY id DESC LIMIT 1', [req.user.accountId]);
-        if (existing.length > 0 && (existing[0].status === 'pending' || existing[0].status === 'approved')) {
-            return res.status(400).json({ error: 'Você já possui uma aplicação pendente ou aprovada.' });
-        }
-
         const needsExtraReview = detectsStrongConcept(biography, motivations, weaknesses, social_ties) ? 1 : 0;
-
-        await pool.execute(
-            `INSERT INTO characters
-               (account_id, first_name, last_name, biography, motivations, weaknesses, social_ties, needs_extra_review, status)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [req.user.accountId, first_name, last_name, biography, motivations, weaknesses, social_ties, needsExtraReview, 'pending']
-        );
-
-        await pool.execute(
-            'INSERT INTO whitelist_applications (account_id, status) VALUES (?, ?)',
-            [req.user.accountId, 'pending']
-        );
-
-        res.json({ ok: true });
-    } catch (err) { console.error('[/api/apply]', err); res.status(500).json({ error: 'Erro interno do servidor' }); }
+        const result = await submitWhitelistApplication(pool, req.user.accountId, {
+          first_name, last_name, biography, motivations, weaknesses, social_ties, needsExtraReview
+        });
+        res.json({ ok: true, ...result });
+    } catch (err) {
+      if (err instanceof WhitelistWorkflowError) {
+        return res.status(err.httpStatus).json({ error: err.message, code: err.code });
+      }
+      console.error('[/api/apply]', err);
+      res.status(500).json({ error: 'Erro interno do servidor' });
+    }
 });
 
 // ── API: Dashboard ─────────────────────────────────────────────────────────
-app.get('/api/dashboard', requireStaff, async (req, res) => {
+app.get('/api/dashboard', requireAuditPermission, async (req, res) => {
   try {
     const [accounts]    = await pool.execute('SELECT COUNT(*) as c FROM accounts');
     const [chars]       = await pool.execute('SELECT COUNT(*) as c FROM characters');
@@ -310,7 +374,7 @@ app.get('/api/dashboard', requireStaff, async (req, res) => {
 });
 
 // ── API: Whitelist ─────────────────────────────────────────────────────────
-app.get('/api/whitelist', requireStaff, async (req, res) => {
+app.get('/api/whitelist', requireWhitelistPermission, async (req, res) => {
   try {
     const rows = await db(
       `SELECT wa.id, wa.status, wa.created_at, wa.reviewer_notes,
@@ -320,7 +384,7 @@ app.get('/api/whitelist', requireStaff, async (req, res) => {
        FROM whitelist_applications wa
        LEFT JOIN accounts a ON a.id = wa.account_id
        LEFT JOIN discord_identities d ON d.account_id = a.id
-       LEFT JOIN characters c ON c.account_id = a.id
+       LEFT JOIN characters c ON c.id = wa.character_id
        ORDER BY wa.status='pending' DESC, wa.created_at DESC
        LIMIT 100`
     );
@@ -346,72 +410,58 @@ function notifyModerationLog(evento) {
     }).catch(e => console.error('[web] Falha ao enviar log de moderacao:', e.message));
 }
 
-app.patch('/api/whitelist/:id', requireStaff, async (req, res) => {
-  const { status, reviewer_notes, extra_review_notes } = req.body;
+app.patch('/api/whitelist/:id', requireWhitelistPermission, async (req, res) => {
+  const { status, expected_status, reviewer_notes, extra_review_notes } = req.body;
   const validStatuses = ['approved', 'rejected', 'pending'];
   if (!validStatuses.includes(status)) return res.status(400).json({ error: 'Status inválido' });
+  if (!validStatuses.includes(expected_status)) {
+    return res.status(400).json({ error: 'Status anterior esperado é obrigatório' });
+  }
+  const applicationId = Number(req.params.id);
+  if (!Number.isSafeInteger(applicationId) || applicationId <= 0) {
+    return res.status(400).json({ error: 'ID de aplicação inválido' });
+  }
+  if (reviewer_notes != null && typeof reviewer_notes !== 'string') {
+    return res.status(400).json({ error: 'Notas da revisão inválidas' });
+  }
+  if (extra_review_notes != null && typeof extra_review_notes !== 'string') {
+    return res.status(400).json({ error: 'Notas da revisão extra inválidas' });
+  }
+  const cleanReviewerNotes = reviewer_notes === undefined
+    ? undefined
+    : (reviewer_notes?.trim() || null);
+  const cleanExtraReviewNotes = extra_review_notes === undefined
+    ? undefined
+    : (extra_review_notes?.trim() || null);
+  if ((cleanReviewerNotes?.length || 0) > 10000 || (cleanExtraReviewNotes?.length || 0) > 10000) {
+    return res.status(400).json({ error: 'Notas passam do limite de 10000 caracteres' });
+  }
+
   try {
-    await db(
-      'UPDATE whitelist_applications SET status=?, reviewer_notes=?, reviewed_at=NOW() WHERE id=?',
-      [status, reviewer_notes || null, req.params.id]
-    );
-
-    // Notas da staff sobre o conceito sinalizado como needs_extra_review (opcional).
-    if (typeof extra_review_notes === 'string' && extra_review_notes.trim()) {
-      await db(
-        `UPDATE characters c
-         INNER JOIN accounts a ON a.id = c.account_id
-         INNER JOIN whitelist_applications wa ON wa.account_id = a.id
-         SET c.extra_review_notes=?
-         WHERE wa.id=? AND c.status='pending'`, [extra_review_notes.trim(), req.params.id]
-      );
-    }
-
-    // Buscar o discord_id e account_id relacionados para notificar o bot e auditar
-    const idRows = await db(
-      `SELECT d.discord_id, a.id as account_id FROM discord_identities d
-       INNER JOIN accounts a ON a.id = d.account_id
-       INNER JOIN whitelist_applications wa ON wa.account_id = a.id
-       WHERE wa.id=?`, [req.params.id]
-    );
-
-    // Se aprovado, aprova também o personagem.
-    //
-    // `c.status='pending'` é obrigatório aqui: sem ele, o UPDATE varre TODOS os
-    // personagens da conta e reescreve o status de qualquer um deles — inclusive
-    // os que a staff aposentou com /permakill (`status='retired'`, ver
-    // admin-service.retireCharacter). Aprovar uma ficha nova ressuscitava o
-    // personagem morto permanentemente e apagava a consequência do permakill.
-    if (status === 'approved') {
-      await db(
-        `UPDATE characters c
-         INNER JOIN accounts a ON a.id = c.account_id
-         INNER JOIN whitelist_applications wa ON wa.account_id = a.id
-         SET c.status='approved'
-         WHERE wa.id=? AND c.status='pending'`, [req.params.id]
-      );
-    }
-
-    // Auditoria: registra quem revisou a aplicação de whitelist
-    const auditAction = status === 'approved' ? 'whitelist:approve'
-      : status === 'rejected' ? 'whitelist:reject'
-      : 'whitelist:reset';
-    await db(
-      'INSERT INTO audit_logs (action, actor_account_id, target_account_id, details) VALUES (?, ?, ?, ?)',
-      [auditAction, req.user.accountId, idRows.length > 0 ? idRows[0].account_id : null, reviewer_notes || null]
-    );
+    const review = await reviewWhitelistApplication(pool, {
+      applicationId,
+      status,
+      expectedStatus: expected_status,
+      reviewerNotes: cleanReviewerNotes,
+      extraReviewNotes: cleanExtraReviewNotes,
+      reviewerAccountId: req.user.accountId,
+      reviewedBy: String(req.user.username || `conta #${req.user.accountId}`).slice(0, 128)
+    });
 
     // Sincronizar com o Bot do Discord
-    if (idRows.length > 0) {
+    if (review.stateChanged && review.discordId) {
         try {
-            await fetch(`${BOT_INTERNAL_URL}/api/sync-role`, {
+            const botResponse = await fetch(`${BOT_INTERNAL_URL}/api/sync-role`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     'X-Internal-Secret': INTERNAL_API_SECRET
                 },
-                body: JSON.stringify({ discord_id: idRows[0].discord_id, status })
+                body: JSON.stringify({ discord_id: review.discordId, status })
             });
+            if (!botResponse.ok) {
+              throw new Error(`Bot respondeu HTTP ${botResponse.status}`);
+            }
         } catch (e) {
             console.error('[web] Falha ao notificar o Bot do Discord:', e.message);
         }
@@ -426,17 +476,23 @@ app.patch('/api/whitelist/:id', requireStaff, async (req, res) => {
     // ja esta gravada no banco e no audit_logs acima.
     //
     // Nao e `await`ado pelo mesmo motivo.
-    notifyModerationLog({
+    if (review.stateChanged) notifyModerationLog({
         kind: status === 'approved' ? 'whitelist_approve'
             : status === 'rejected' ? 'whitelist_reject'
             : 'whitelist_reset',
-        target: idRows.length > 0 ? `<@${idRows[0].discord_id}>` : `aplicacao #${req.params.id}`,
+        target: review.discordId ? `<@${review.discordId}>` : `aplicacao #${applicationId}`,
         moderator: req.user.username || `conta #${req.user.accountId}`,
         reason: reviewer_notes || null
     });
 
-    res.json({ ok: true });
-  } catch (err) { console.error('[/api/whitelist PATCH]', err); res.status(500).json({ error: 'Erro interno do servidor' }); }
+    res.json({ ok: true, stateChanged: review.stateChanged });
+  } catch (err) {
+    if (err instanceof WhitelistWorkflowError) {
+      return res.status(err.httpStatus).json({ error: err.message, code: err.code });
+    }
+    console.error('[/api/whitelist PATCH]', err);
+    res.status(500).json({ error: 'Erro interno do servidor' });
+  }
 });
 
 // ── API: Personagens ───────────────────────────────────────────────────────
@@ -458,7 +514,7 @@ app.get('/api/characters', requireStaff, async (req, res) => {
 });
 
 // ── API: Audit Logs ────────────────────────────────────────────────────────
-app.get('/api/audit', requireStaff, async (req, res) => {
+app.get('/api/audit', requireAuditPermission, async (req, res) => {
   try {
     const rows = await db(
       `SELECT al.id, al.action, al.details, al.created_at,
@@ -624,7 +680,7 @@ app.post('/api/crashes/client', async (req, res) => {
   }
 });
 
-app.get('/api/crashes', requireStaff, async (req, res) => {
+app.get('/api/crashes', requireAuditPermission, async (req, res) => {
   try {
     await ensureCrashReportDir();
     const names = (await fsp.readdir(CRASH_REPORT_DIR)).filter((name) => name.endsWith('.json'));
@@ -697,7 +753,8 @@ app.get('/api/servers/:masterKey/sessions/:session', async (req, res) => {
 
     const rows = await db(
       `SELECT id, account_id, discord_id FROM game_sessions
-       WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > NOW()`,
+       WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > NOW()
+         AND resolve_count = 0`,
       [hashTicket(session)]
     );
 
@@ -705,12 +762,32 @@ app.get('/api/servers/:masterKey/sessions/:session', async (req, res) => {
     // `loginFailedSessionNotFound` pro cliente, que é a mensagem correta.
     if (rows.length === 0) return res.status(404).json({ error: 'Session not found' });
 
-    // Contabiliza o uso. `resolve_count` alto é sinal de sessão compartilhada
-    // entre máquinas — vale olhar quando aparecer.
-    await db(
-      'UPDATE game_sessions SET last_resolved_at = NOW(), resolve_count = resolve_count + 1 WHERE id = ?',
+    // Consumo atômico: duas máquinas com o mesmo token podem chegar depois do
+    // mesmo SELECT, mas só uma muda resolve_count de zero para um. A outra não
+    // recebe identidade e precisa obter uma sessão nova pelo launcher.
+    const consumed = await db(
+      `UPDATE game_sessions
+          SET last_resolved_at = NOW(), resolve_count = resolve_count + 1
+        WHERE id = ? AND revoked_at IS NULL AND expires_at > NOW()
+          AND resolve_count = 0`,
       [rows[0].id]
     );
+    if (Number(consumed?.affectedRows) !== 1) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    // A resolução nativa substituiu o endpoint legado da game-api, mas a fila
+    // ainda precisa saber que a reserva virou conexão. Aceitar sem confirmar
+    // liberaria esse slot incorretamente após o TTL de três minutos.
+    try {
+      await sessionOccupancyNotifier({
+        accountId: Number(rows[0].account_id),
+        sessionId: Number(rows[0].id)
+      });
+    } catch (notifyError) {
+      console.error('[master-api] Falha ao confirmar ocupacao na game-api:', notifyError.message);
+      return res.status(503).json({ error: 'Session service unavailable' });
+    }
 
     // A forma da resposta é ditada pelo SkyMP, não por nós: `data.user.id`.
     res.json({ user: { id: rows[0].account_id, discordId: rows[0].discord_id } });
@@ -811,6 +888,12 @@ app.post('/api/launcher/oauth/exchange', async (req, res) => {
     // Discord de fato autenticou. O ticket carrega essa prova até a fila
     // (apps/game-api), que não teria como verificar nada sozinha.
     if (accountId) {
+      try {
+        profile.discordRoleAccess = await refreshDiscordRoleAccess(accountId, user.id);
+      } catch (roleError) {
+        console.error(`[discord-role-access] Bot indisponível para ${user.id}: ${roleError.message}`);
+        profile.discordRoleAccess = { eligible: false, verified: false };
+      }
       profile.launchTicket = await issueLaunchTicket(accountId, user.id, ip);
     }
 
@@ -843,4 +926,12 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, validateApplication, issueLaunchTicket, hashTicket, pruneCrashReports, CRASH_REPORT_DIR };
+module.exports = {
+  app,
+  validateApplication,
+  issueLaunchTicket,
+  hashTicket,
+  pruneCrashReports,
+  CRASH_REPORT_DIR,
+  setSessionOccupancyNotifierForTests
+};

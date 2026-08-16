@@ -12,6 +12,7 @@ const api = {
   discordLogin: () => ipcRenderer.invoke('discord-login'),
   discordLogout: () => ipcRenderer.invoke('discord-logout'),
   getAuthStatus: () => ipcRenderer.invoke('get-auth-status'),
+  getServerStatus: () => ipcRenderer.invoke('get-server-status'),
   joinQueue: () => ipcRenderer.invoke('join-queue'),
   pollQueue: () => ipcRenderer.invoke('poll-queue'),
   getLocalPlugins: (folderPath: string) => ipcRenderer.invoke('get-local-plugins', folderPath),

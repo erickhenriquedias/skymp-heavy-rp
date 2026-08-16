@@ -7,6 +7,12 @@ import https from 'https';
 import crypto from 'crypto';
 import { URL } from 'url';
 import { parsePluginsTxt, parsePluginHeader, compareMods, analyzePlugins, parseCccTxt, analyzeCreationClub } from './parity.mjs';
+import { buildSkyMpClientSettings, validateSkyMpSession } from './auth-settings.mjs';
+import { inspectArchiveForExtraction } from './archive-safety.mjs';
+import { assertTrustedUpdateUrl } from './remote-source-policy.mjs';
+import { md5File } from './file-hash.mjs';
+import { normalizeServerStatus, offlineServerStatus } from './server-status.mjs';
+import manifestContract from '../../../skymp/packages/mods-manifest-contract.js';
 
 // ─── Constants & Env ───
 // Estes valores são substituídos em tempo de build pelo `define` do
@@ -27,6 +33,7 @@ const LAUNCHER_CONFIG_FILE = path.join(app.getPath('userData'), 'launcher-config
 const CLIENT_VERSION_FILENAME = 'skymp_client_version.txt';
 const MODS_VERSION_FILENAME = 'skymp_mods_version.txt';
 const MODS_PARTS_FILENAME = 'skymp_mods_parts.json';
+const { validateModsManifestContract } = manifestContract;
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -422,13 +429,60 @@ function postJsonToUrl(url: string, body: any): Promise<{ status: number, data: 
   });
 }
 
-function httpGetJson(url: string): Promise<any> {
+function getGameApiJson(pathname: string): Promise<{ status: number, data: unknown }> {
   return new Promise((resolve) => {
-    const mod = url.startsWith('https:') ? https : http;
-    const req = mod.get(url, { headers: { 'User-Agent': 'Skyrim-Heavy-RP-Launcher' } }, (res) => {
+    let settled = false;
+    const finish = (value: { status: number, data: unknown }) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    const req = http.request({
+      hostname: SERVER_IP,
+      port: API_PORT,
+      path: pathname,
+      method: 'GET',
+      headers: { 'Accept': 'application/json' },
+    }, (res) => {
+      let data = '';
+      let oversized = false;
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => {
+        if (oversized) return;
+        data += chunk;
+        if (Buffer.byteLength(data) > 64 * 1024) {
+          oversized = true;
+          req.destroy();
+          finish({ status: res.statusCode || 500, data: null });
+        }
+      });
+      res.on('end', () => {
+        if (oversized) return;
+        try { finish({ status: res.statusCode || 500, data: JSON.parse(data) }); }
+        catch { finish({ status: res.statusCode || 500, data: null }); }
+      });
+    });
+    req.setTimeout(5000, () => {
+      req.destroy();
+      finish({ status: 0, data: null });
+    });
+    req.on('error', () => finish({ status: 0, data: null }));
+    req.end();
+  });
+}
+
+function httpGetJson(url: string, redirectsLeft = 5): Promise<any> {
+  return new Promise((resolve) => {
+    let trustedUrl: URL;
+    try { trustedUrl = assertTrustedUpdateUrl(url); } catch { resolve(null); return; }
+    const req = https.get(trustedUrl, { headers: { 'User-Agent': 'Skyrim-Heavy-RP-Launcher' } }, (res) => {
       if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume();
-        resolve(httpGetJson(new URL(res.headers.location, url).toString()));
+        if (redirectsLeft <= 0) { resolve(null); return; }
+        let nextUrl: string;
+        try { nextUrl = new URL(res.headers.location, trustedUrl).toString(); }
+        catch { resolve(null); return; }
+        resolve(httpGetJson(nextUrl, redirectsLeft - 1));
         return;
       }
       if (res.statusCode !== 200) {
@@ -452,22 +506,18 @@ function httpGetJson(url: string): Promise<any> {
 
 function downloadToFile(url: string, destPath: string, onProgress?: (percent: number) => void, redirectsLeft = 5): Promise<void> {
   return new Promise((resolve, reject) => {
-    if (!url.startsWith('https:')) {
-      reject(new Error(`Download bloqueado: esquema de URL nao seguro (${url})`));
-      return;
-    }
-    const req = https.get(url, { headers: { 'User-Agent': 'Skyrim-Heavy-RP-Launcher' } }, (res) => {
+    let trustedUrl: URL;
+    try { trustedUrl = assertTrustedUpdateUrl(url); } catch (error) { reject(error); return; }
+    const req = https.get(trustedUrl, { headers: { 'User-Agent': 'Skyrim-Heavy-RP-Launcher' } }, (res) => {
       if (res.statusCode && [301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
         res.resume();
         if (redirectsLeft <= 0) {
           reject(new Error('Muitos redirecionamentos'));
           return;
         }
-        const nextUrl = new URL(res.headers.location, url).toString();
-        if (!nextUrl.startsWith('https:')) {
-          reject(new Error(`Download bloqueado: redirecionamento para esquema inseguro (${nextUrl})`));
-          return;
-        }
+        let nextUrl: string;
+        try { nextUrl = new URL(res.headers.location, trustedUrl).toString(); }
+        catch { reject(new Error('Redirecionamento de atualização inválido.')); return; }
         downloadToFile(nextUrl, destPath, onProgress, redirectsLeft - 1).then(resolve, reject);
         return;
       }
@@ -503,7 +553,11 @@ function sha256File(filePath: string): Promise<string> {
   });
 }
 
-function extractZip(zipPath: string, destDir: string): Promise<void> {
+async function extractZip(zipPath: string, destDir: string): Promise<void> {
+  // O hash autentica o arquivo recebido, mas não torna seguros os caminhos que
+  // existem dentro dele. Toda entrada é validada antes de qualquer escrita.
+  await inspectArchiveForExtraction(zipPath, destDir);
+
   return new Promise((resolve, reject) => {
     const tar = spawn('tar', ['-xf', zipPath, '-C', destDir], { windowsHide: true });
     let stderr = '';
@@ -770,6 +824,12 @@ ipcMain.handle('get-auth-status', async () => {
   };
 });
 
+ipcMain.handle('get-server-status', async () => {
+  const response = await getGameApiJson('/status');
+  if (response.status !== 200) return offlineServerStatus();
+  return normalizeServerStatus(response.data);
+});
+
 // ─── Queue System ───
 //
 // A fila é autenticada por ticket, não por `discordId`: discordId é público, e
@@ -899,13 +959,25 @@ ipcMain.handle('verify-mods', async (_event, folderPath) => {
     if (!modsJson || !modsJson.mods) {
       return { success: false, error: "Falha ao baixar mods.json do servidor. Servidor pode estar offline." };
     }
+    const manifestContractResult = validateModsManifestContract(modsJson);
+    if (!manifestContractResult.ok) {
+      return {
+        success: false,
+        error: `Manifesto de mods incompatível: ${manifestContractResult.reason}. Atualize o launcher.`
+      };
+    }
 
     const allFiles = fs.readdirSync(dataPath);
-    const hashOf = (filename: string) => {
-      const h = crypto.createHash('md5');
-      h.update(fs.readFileSync(path.join(dataPath, filename)));
-      return h.digest('hex');
-    };
+    const filesByLowerName = new Map(allFiles.map(filename => [filename.toLowerCase(), filename]));
+    const hashesByLowerName = new Map<string, string>();
+    for (const mod of modsJson.mods) {
+      const lowerName = String(mod.filename).toLowerCase();
+      const localFilename = filesByLowerName.get(lowerName);
+      if (localFilename && !hashesByLowerName.has(lowerName)) {
+        hashesByLowerName.set(lowerName, await md5File(path.join(dataPath, localFilename)));
+      }
+    }
+    const hashOf = (filename: string) => hashesByLowerName.get(filename.toLowerCase()) || '';
 
     const resultado = compareMods({ serverMods: modsJson.mods, localFiles: allFiles, hashOf });
     if (!resultado.success) return resultado;
@@ -988,7 +1060,7 @@ ipcMain.handle('sync-loadorder', async (_event, folderPath, serverLoadOrder) => 
     const localAppData = process.env.LOCALAPPDATA || path.join(process.env.USERPROFILE || '', 'AppData', 'Local');
     const pluginsTxtDir = path.join(localAppData, 'Skyrim Special Edition');
     if (!fs.existsSync(pluginsTxtDir)) fs.mkdirSync(pluginsTxtDir, { recursive: true });
-    
+
     fs.writeFileSync(path.join(pluginsTxtDir, 'plugins.txt'), resultLines.join('\r\n') + '\r\n');
     return true;
   } catch {
@@ -1178,42 +1250,27 @@ ipcMain.handle('launch-game', async (_event, folderPath, ticket) => {
 
   try {
     const auth = readAuthFile();
-    if (auth && auth.discordId) {
-      const configPath = path.join(folderPath, 'Data', 'Platform', 'Plugins', 'skymp_config.json');
-      let config: any = {};
-      if (fs.existsSync(configPath)) {
-        try { config = JSON.parse(fs.readFileSync(configPath, 'utf8')); } catch {}
-      }
-      
-      config.session = `ticket:${ticket || ''}`;
-      config.serverAddress = `${SERVER_IP}:${SERVER_PORT}`;
-      config.discordId = auth.discordId;
-      delete config.profileId;
-      
-      const configDir = path.dirname(configPath);
-      if (!fs.existsSync(configDir)) fs.mkdirSync(configDir, { recursive: true });
-      fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+    if (!auth || !auth.discordId) return false;
 
-      const clientSettingsPath = path.join(folderPath, 'Data', 'Platform', 'Plugins', 'skymp5-client-settings.txt');
-      let clientSettings: any = {};
-      if (fs.existsSync(clientSettingsPath)) {
-        try { clientSettings = JSON.parse(fs.readFileSync(clientSettingsPath, 'utf8')); } catch {}
-      }
-      if (!clientSettings.gameData) clientSettings.gameData = {};
-      
-      delete clientSettings.gameData.token;
-      delete clientSettings.gameData.session;
-      
-      clientSettings.gameData.profileId = parseInt(auth.discordId.slice(-8), 10) || 0;
-      clientSettings.gameData.launcherTicket = String(ticket || '');
-      clientSettings['server-ip'] = SERVER_IP;
-      clientSettings['server-port'] = SERVER_PORT;
-      clientSettings['master'] = '';
-      
-      fs.writeFileSync(clientSettingsPath, JSON.stringify(clientSettings, null, 2));
+    const session = validateSkyMpSession(ticket);
+    const clientSettingsPath = path.join(folderPath, 'Data', 'Platform', 'Plugins', 'skymp5-client-settings.txt');
+    let clientSettings: unknown = {};
+    if (fs.existsSync(clientSettingsPath)) {
+      try { clientSettings = JSON.parse(fs.readFileSync(clientSettingsPath, 'utf8')); } catch {}
     }
+
+    const nextClientSettings = buildSkyMpClientSettings(clientSettings, {
+      session,
+      serverIp: SERVER_IP,
+      serverPort: SERVER_PORT,
+    });
+
+    const configDir = path.dirname(clientSettingsPath);
+    if (!fs.existsSync(configDir)) fs.mkdirSync(configDir, { recursive: true });
+    fs.writeFileSync(clientSettingsPath, JSON.stringify(nextClientSettings, null, 2));
   } catch (e) {
-    console.error('Error injecting session:', e);
+    console.error('Error injecting SkyMP session:', e instanceof Error ? e.message : 'unknown error');
+    return false;
   }
 
   exec('taskkill /F /T /IM SkyrimSE.exe & taskkill /F /T /IM skse64_loader.exe & taskkill /F /IM "SkyrimPlatformCEF.exe.hidden" & taskkill /F /IM "SkyrimPlatformCEF.exe"', () => {

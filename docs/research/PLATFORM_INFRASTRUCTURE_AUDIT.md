@@ -6,6 +6,61 @@ Escopo declarado: o caminho **login → whitelist → launcher → update → mo
 
 > **Estado do projeto, que governa toda recomendação abaixo:** ninguém nunca conectou dois clientes. A Fase 0 continua sendo o bloqueio real ([`FASE_0_ROTEIRO.md`](../technical/FASE_0_ROTEIRO.md)). Nenhum item desta auditoria entra na frente dela, e a §17 diz explicitamente o que **não** fazer agora.
 
+> **Atualização de 16/08/2026 — `PLAT-07` corrigido no código:** todo ZIP de
+> cliente ou modpack passa agora por inspeção do diretório central antes da
+> extração. Caminho absoluto ou com `..`, ADS/nome reservado do Windows,
+> colisão case-insensitive, symlink/junction e limites de quantidade/tamanho
+> falham antes de qualquer escrita. Os testes incluem um ZIP hostil real. A
+> instalação empacotada em máquina limpa continua sendo validação operacional.
+>
+> **Atualização de 16/08/2026 — `PLAT-27` corrigido no código:** o loader da
+> game-api distingue manifesto inválido de `manifest_empty` e recusa tanto
+> `mods` vazio quanto `loadOrder` vazia. Assim, `/mods.json` responde `503` no
+> servidor em vez de delegar a última barreira ao launcher do jogador.
+>
+> **Atualização de 16/08/2026 — `PLAT-08` corrigido no código:** feeds,
+> downloads e cada destino de redirecionamento exigem HTTPS, porta padrão, URL
+> sem credenciais e host exato da allowlist de GitHub Releases. Há limite de
+> cinco redirecionamentos e testes para HTTP, host externo, domínio parecido,
+> credenciais, porta e redirect hostil.
+>
+> **Atualização de 16/08/2026 — `PLAT-10` corrigido no código:** a paridade
+> deixou de usar `readFileSync` para BSAs. Os arquivos exigidos pelo manifesto
+> são hasheados por stream, um por vez, mantendo MD5 apenas por compatibilidade
+> com o formato atual. O teste com BSA real acima de 2 GB continua operacional.
+>
+> **Atualização de 16/08/2026 — `PLAT-06` corrigido no código:** o contrato
+> compartilhado exige `manifestVersion: 1`, canal conhecido e identificador de
+> build. Gerador, game-api e launcher recusam manifesto legado, versão futura,
+> canal desconhecido ou build vazio. Vincular cada URL a um canal específico
+> continua sendo o escopo separado de `PLAT-21`.
+>
+> **Atualização de 16/08/2026 — `PLAT-12` corrigido no código:** o gerador não
+> grava mais `sourceDataDir`; o manifesto público preserva apenas a procedência
+> lógica da load order, sem caminho absoluto da máquina de build.
+>
+> **Atualização de 16/08/2026 — `PLAT-17` corrigido no código:** game-api,
+> painel web e bot passaram a usar o mesmo rate limiter compartilhado. Ele
+> remove buckets expirados por sweep oportunista, impõe teto global de 50.000
+> chaves por processo e não acumula requisições que já foram bloqueadas. Não há
+> timer permanente nem scan global por requisição. Flood real de IPs distintos
+> ainda precisa ser medido em carga.
+>
+> **Atualização de 16/08/2026 — `PLAT-16` corrigido no código:** a game-api
+> remove `launch_tickets` e `game_sessions` vencidos além das retenções
+> configuradas, usando `expires_at`, lotes limitados e os índices existentes do
+> MariaDB. Roda uma vez no boot e depois oportunisticamente, sem sobreposição e
+> sem timer permanente. Backlog e plano real de execução ainda precisam ser
+> validados contra uma instância MariaDB.
+>
+> **Atualização de 16/08/2026 — `PLAT-13` corrigido no código:** antes de abrir
+> a porta, a game-api reconstrói a ocupação com sessões ativas do MariaDB. O
+> master confirma cada resolução pelo endpoint interno autenticado e falha
+> fechado se a fila não reconhecer a admissão. Tokens em claro não são
+> reconstruídos. O restart com dois clientes continua sendo teste operacional;
+> A migration v19 e o lease por conexão fecharam a revogação ampla; a prova com
+> MariaDB e dois clientes reais continua operacional.
+
 ---
 
 ## 1. Procedência: o que foi verificado, e como
@@ -49,7 +104,10 @@ Duas etapas do fluxo desejado **não estão no caminho**:
 - **Update** não é chamado. `checkClientUpdate`, `installClientUpdate`, `checkModsUpdate` e `installModsUpdate` existem no `main.ts` e no `preload.ts`, mas o único lugar do renderer que os invoca é a tela de Configurações (`Settings.tsx:95,113,128`). Um jogador que nunca abre Configurações joga com o cliente e o modpack que instalou no primeiro dia.
 - **Repair** não existe em lugar nenhum. Não há handler, não há IPC, não há tela.
 
-E há um terceiro problema, que é o que a §21 do briefing descreve: quando `verify-mods` reprova, `Home.tsx:84-87` escreve `Mods invalidos: <primeira mensagem>` e retorna. Não há botão, não há conserto, não há link. O jogador lê "O mod X esta modificado ou corrompido!" e não tem o que fazer dentro do launcher.
+Havia ainda um terceiro problema descrito pela §21 do briefing: `verify-mods`
+parava na primeira divergência. Desde 16/08/2026, a comparação acumula todas as
+ausências e corrupções em uma rodada, e a Home mostra um resumo limitado. O
+caminho de reparo automático continua ausente e permanece em `PLAT-02`.
 
 **Resumo honesto:** o launcher de hoje é um botão PLAY com uma verificação de paridade boa na frente. A verificação é o melhor pedaço do sistema e o beco sem saída é a consequência direta de ela não ter par — detecta e não conserta.
 
@@ -65,30 +123,37 @@ Severidade é sobre **o dia em que houver jogadores**, não sobre hoje. Hoje nad
 |---|---|---|---|
 | `PLAT-01` | Update fora do caminho de jogar | `Home.tsx:61-116` vs `Settings.tsx:95` | **Alta** |
 | `PLAT-02` | Falha de paridade é beco sem saída: detecta e não conserta | `Home.tsx:84-87` | **Alta** |
-| `PLAT-03` | "Status do Servidor: Online" é literal fixo no JSX, não consulta nada | `Home.tsx:156-160` | Média |
+| `PLAT-03` | **Corrigido em 16/08/2026:** launcher consulta `/status`, valida o contrato antes do IPC e apresenta todos os estados | `server-status.mjs`, `main.ts`, `Home.tsx` | Resolvida no código |
 | `PLAT-04` | Não há máquina de estados: uma string `status` e um booleano `isPlaying` | `Home.tsx:15-16` | Média |
-| `PLAT-05` | `verify-mods` devolve só a **primeira** divergência; a lista completa é descartada | `parity.mjs:113-123` | Média |
+| `PLAT-05` | **Corrigido em 16/08/2026:** `verify-mods` acumula todas as ausências/corrupções e a Home resume sem descartar a contagem | `parity.mjs`, `parity.test.mjs`, `Home.tsx` | Resolvida no código |
 
-`PLAT-03` merece um parágrafo. A bolinha verde é desenhada com `backgroundColor: 'var(--success)'` e o texto "Online" é literal. Com o servidor caído, o launcher continua dizendo que está no ar, e o jogador só descobre o contrário quando a fila devolve `connection_failed`. Uma UI que afirma o que não verificou é pior que uma UI sem informação.
+`PLAT-03` foi fechado sem entregar a rede ao renderer. O processo principal faz
+o GET com timeout e limite de resposta, reduz o JSON ao contrato público e
+expõe somente esse resultado pelo IPC. A Home atualiza a cada 15 segundos sem
+sobrepor requisições, mostra jogadores/fila e bloqueia JOGAR nos estados
+`offline`, `starting` e `maintenance`; `full` oferece entrada na fila. Ainda
+falta confirmar visualmente todos os estados no executável empacotado.
 
 ### 3.2 Manifesto e sincronização de mods
 
 | ID | Achado | Evidência | Sev. |
 |---|---|---|---|
-| `PLAT-06` | `mods.json` não é versionado: sem `manifestVersion`, `channel` ou `build` | `modsManifest.js:20-28`, `mods.json` | **Alta** |
+| `PLAT-06` | `mods.json` não era versionado; corrigido em 16/08/2026 com contrato compartilhado v1 | `mods-manifest-contract.js` + gerador/loader/launcher | **Corrigido** |
 | `PLAT-07` | Zip slip: extração roda `tar -xf`/`Expand-Archive` direto sobre a pasta do jogo | `main.ts:506-521` | Média-alta |
-| `PLAT-08` | Sem allowlist de host: `downloadToFile` exige HTTPS mas aceita qualquer host, inclusive por redirecionamento; `httpGetJson` aceita **HTTP** e redireciona pra qualquer host | `main.ts:427-431`, `455-472` | Média-alta |
+| `PLAT-08` | Feed/download aceitavam qualquer host; corrigido em 16/08/2026 com allowlist exata e revalidação de redirects | `remote-source-policy.mjs` + `main.ts` | **Corrigido** |
 | `PLAT-09` | Substituição não é atômica: sem staging, sem backup, sem quarentena | `main.ts:1127` | Média |
-| `PLAT-10` | `verify-mods` lê o arquivo inteiro em memória pra hashear | `main.ts:904-908` | Média |
+| `PLAT-10` | Paridade carregava o arquivo inteiro; corrigido em 16/08/2026 com hash sequencial por stream | `file-hash.mjs` + `main.ts` | **Corrigido** |
 | `PLAT-11` | Arquivo extra em `Data/` passa: `compareMods` só percorre a lista do servidor | `parity.mjs:113-123` | Média |
-| `PLAT-12` | `mods.json` publica `sourceDataDir` — o caminho da máquina de quem gerou | `generate-mods-manifest.js:179` | Baixa |
-| `PLAT-27` | Manifesto **vazio é servido com 200**. A proteção que o cabeçalho do módulo promete está, na verdade, no cliente | `modsManifest.js:20-28` vs `parity.mjs:165-171` | **Alta** |
+| `PLAT-12` | `mods.json` publicava o path da máquina geradora; removido em 16/08/2026 | `generate-mods-manifest.js` + teste | **Corrigido** |
+| `PLAT-27` | Manifesto vazio era servido com 200; corrigido no loader em 16/08/2026 com `manifest_empty` | `modsManifest.js` + `modsManifest.test.js` | **Corrigido** |
 
 Sobre `PLAT-06`: hoje o launcher não tem como saber se entende o manifesto que recebeu. `isValidManifest` aceita qualquer objeto com `mods[]` e `loadOrder[]`. No dia em que o formato mudar, um launcher antigo lerá o manifesto novo, ignorará os campos que não conhece e **aprovará o jogador com base numa leitura parcial** — que é exatamente a classe de falha que o 503 do `/mods.json` existe pra impedir.
 
 Sobre `PLAT-07`: o hash confere antes de extrair (isso está certo e é explícito em `main.ts:1121-1125`), mas a verificação prova que o ZIP é o ZIP esperado, não que o conteúdo dele é seguro. `tar` e `Expand-Archive` seguem `..` sem reclamar. A defesa hoje é inteiramente "o repositório de distribuição não foi comprometido". Crows trata isso como controle nomeado (`docs/MOD_SYNC_SECURITY.md`: bloqueio de `..`, caminho absoluto, symlink/junction, nome reservado e zip bomb).
 
-Sobre `PLAT-10`: `sha256File` (`main.ts:496-504`) já usa stream. O `hashOf` de `verify-mods` usa `fs.readFileSync`. A assimetria parece acidental, e o custo é concreto: BSAs de Skyrim passam de 2 GB, e acima do limite de `Buffer` do Node isso lança uma exceção que chega ao jogador como `Mods invalidos: <mensagem de alocação>`.
+Sobre `PLAT-10`: a assimetria foi removida. `verify-mods` calcula MD5 por stream
+e mantém somente os hashes pequenos em memória; a validação operacional de uma
+BSA real acima de 2 GB continua na lista de testes.
 
 Sobre `PLAT-11`: a direção que falta aqui é a mesma que `analyzePlugins` já corrigiu para plugins (`parity.mjs:199-211`). Para plugins, um extra é reprovado. Para BSA, não — e uma BSA extra pode sobrescrever assets de uma BSA legítima por precedência de carga.
 
@@ -100,31 +165,51 @@ O jogador **não** entra, e é importante ser exato sobre por quê: quem barra �
 
 | ID | Achado | Evidência | Sev. |
 |---|---|---|---|
-| `PLAT-13` | Fila em memória, sessões no banco: reiniciar a `game-api` zera a ocupação sem invalidar sessão nenhuma | `queue.js:29-31` vs `game_sessions` | **Alta** |
-| `PLAT-14` | `/internal/session/release` solta o slot e **não revoga a sessão**; `revoked_at` não é escrito por nenhuma linha do repositório | `server.js:301-306`, migration v8 | **Alta** |
-| `PLAT-15` | Sem proteção de replay: o master resolve o mesmo token indefinidamente e só incrementa `resolve_count` | `apps/web/server.js:708-713` | Média |
-| `PLAT-16` | `launch_tickets` cresce sem expurgo: uma linha por polling, a cada 4 s por jogador na fila | `server.js:282-290`, `Home.tsx:11` | Média |
-| `PLAT-17` | `rateLimitBuckets` é um `Map` por IP que nunca é podado | `server.js:117-124` | Baixa |
+| `PLAT-13` | **Corrigido em 16/08/2026:** boot reidrata ocupação antes de escutar e o master confirma conexão na fila | `queueRecovery.js`, `queue.js`, `server.js`, `session-occupancy-notifier.js` | Resolvida no código |
+| `PLAT-14` | **Corrigido em 16/08/2026:** gamemode reivindica lease opaco e o disconnect revoga/libera somente o hash da conexão exata | `sessionLeaseService.js`, `game-api-session-client.js`, `connection-monitor.js`, migration v19 | Resolvida no código |
+| `PLAT-15` | **Corrigido em 16/08/2026:** master consome cada sessão atomicamente uma vez e sessão nova revoga a anterior sob lock da conta | `apps/web/server.js`, `apps/game-api/server.js` | Resolvida no código |
+| `PLAT-16` | **Corrigido em 16/08/2026:** tickets e sessões vencidos possuem retenção configurável, limpeza indexada em lotes e limite de trabalho por rodada | `credentialRetention.js`, `credentialRetention.test.js`, `server.js` | Resolvida no código |
+| `PLAT-17` | **Corrigido em 16/08/2026:** os três serviços compartilham poda de expirados, teto global e limite de timestamps por bucket | `skymp/packages/sliding-rate-limiter.js`, `apps/game-api/slidingRateLimiter.test.js` | Resolvida no código |
 
-`PLAT-13` é o mais grave dos três de fila. A `game-api` reinicia (deploy, crash, `pm2 restart`), `_admitted` volta vazio, e a capacidade recomeça do zero — enquanto todo mundo que já estava dentro continua com sessão válida por até 12 h. O servidor aceita `QUEUE_CAPACITY` jogadores novos **por cima** dos que já estão jogando. Nada acusa: `snapshot()` reporta a ocupação que a memória conhece, que é a errada.
+`PLAT-13` permitia que a `game-api` reiniciasse com `_admitted` vazio enquanto
+sessões continuavam válidas por até 12 h. Agora o processo consulta o MariaDB e
+só abre a porta depois de restaurar contas conectadas e reservas recentes. Se o
+estado estiver inválido ou o banco falhar, o boot é recusado. A v19 restaura
+também o vínculo da linha e o hash do lease, sem reconstruir credencial em claro.
 
-`PLAT-14` combina mal com `PLAT-15`. Ao desconectar, o jogador libera o slot mas mantém um token de sessão que o master aceita quantas vezes quiserem, por até 12 h (`GAME_SESSION_TTL_SECONDS`). O `resolve_count` foi criado justamente pra detectar sessão compartilhada — e ninguém lê. Contar sem agir é diagnóstico, não controle.
+`PLAT-14` e `PLAT-15` foram fechados juntos porque separar as correções manteria
+uma janela de corrida. O master permite somente a transição atômica
+`resolve_count: 0 → 1`; o gamemode reivindica um lease distinto antes da
+whitelist. Reconectar exige sessão nova, que revoga a anterior sob lock da conta.
+Se o disconnect antigo chegar depois, seu hash já não coincide e vira no-op
+idempotente. Isso está coberto por testes automatizados, mas ainda precisa dos
+cenários operacionais com MariaDB, master e dois clientes reais.
 
-`PLAT-16` tem número: 40 jogadores em fila por uma hora geram ~36 000 linhas em `launch_tickets`. A tabela tem índice único no hash e nenhum job de limpeza em lugar nenhum do repositório.
+`PLAT-16` tinha número: 40 jogadores em fila por uma hora geram ~36 000 linhas
+em `launch_tickets`. Desde 16/08/2026, a game-api preserva uma retenção padrão
+de 24 h para tickets e 7 dias após a expiração das sessões, apagando no máximo
+10 lotes de 500 linhas por tabela em cada rodada. O teste com backlog real
+continua operacional.
 
 ### 3.4 Operação
 
 | ID | Achado | Evidência | Sev. |
 |---|---|---|---|
-| `PLAT-18` | Não existe `/ready`. `/health` mistura vida do processo com estado do manifesto e da fila, e **não toca o banco** | `server.js:310-319` | Média |
-| `PLAT-19` | `/health` é público e devolve capacidade, ocupação, conectados e fila — e o launcher não usa | `server.js:310-319` | Média |
-| `PLAT-20` | Não há como declarar manutenção | ausência | Média |
+| `PLAT-18` | **Corrigido em 16/08/2026:** `/health` é liveness; `/ready` exige manifesto e MariaDB e retorna 503 em falha/manutenção | `readiness.js`, `server.js`, testes HTTP | Resolvida no código |
+| `PLAT-19` | **Corrigido em 16/08/2026:** `/health` não expõe fila; `/status` concentra somente estado e contagens públicas agregadas | `server.js`, `server.http.test.js` | Resolvida no código |
+| `PLAT-20` | **Corrigido em 16/08/2026:** manutenção vem de env, aparece em `/status` e recusa join/poll antes de consumir ticket | `.env.example`, `server.js` | Resolvida no código |
 | `PLAT-21` | Não há canais: `DIST_REPO` único, URLs fixas em `releases/latest/...` e `releases/download/mods/...` | `main.ts:566-572` | Média |
 | `PLAT-22` | Nenhuma pinagem reproduzível de versão (`SKYMP_COMMIT`, `HEAVY_RP_VERSION`, `MODPACK_VERSION`) | ausência | Média |
 | `PLAT-23` | Nenhuma receita de deploy: sem Dockerfile, sem unit systemd, sem workflow de deploy | `git ls-files` | Baixa hoje |
 | `PLAT-24` | Sem rollback | ausência | Baixa hoje |
 
-`PLAT-18` importa mais do que parece: `/health` responde `ok` conforme o manifesto carrega, e o manifesto vem de disco. O banco — de que dependem `consumeLaunchTicket`, `isEligible` e `persistGameSession`, isto é, **a fila inteira** — nunca é testado. Um MySQL fora do ar deixa `/health` verde e todo jogador recebendo `internal_error`.
+`PLAT-18/19/20` agora formam três contratos distintos. `/health` prova somente
+que o processo responde. `/ready` executa `SELECT 1` no MariaDB, valida o
+manifesto e reprova durante manutenção. `/status` é a superfície pública com
+enum e contagens agregadas; não inclui ticket, Discord ou detalhes da reserva.
+Com `MAINTENANCE_MODE=true`, join e polling são recusados antes de consumir a
+credencial. Falta confirmar o comportamento no launcher empacotado e com banco
+realmente indisponível.
 
 `PLAT-23` e `PLAT-24` estão marcados como baixos **hoje** de propósito. Ver §17.
 
@@ -390,19 +475,23 @@ A regra operacional: **a `game-api` decide quem entra; o gamemode decide o que a
 
 ## 13. `/health` e `/ready`
 
-`PLAT-18`, `PLAT-19`. Proposta de três endpoints com públicos diferentes:
+`PLAT-18`, `PLAT-19`. Implementados como três endpoints com públicos diferentes:
 
 | Endpoint | Público | Responde | Conteúdo |
 |---|---|---|---|
-| `GET /health` | orquestrador | 200 sempre que o processo responde | `{ ok: true, uptime, version }` |
-| `GET /ready` | orquestrador | 200 só com **manifesto carregado E banco respondendo** | `{ ok, checks: { manifest, database } }` |
-| `GET /status` | launcher, público | 200 | `{ state, players, capacity, queue, build, message }` |
+| `GET /health` | orquestrador | 200 sempre que o processo responde | `{ ok: true }` |
+| `GET /ready` | orquestrador | 200 só com **manifesto carregado E banco respondendo**, fora de manutenção | `{ ready, checks: { manifest, database, maintenance } }` |
+| `GET /status` | launcher, público | 200 | `{ state, players, capacity, queue, message }` |
 
-Por que três e não dois: `/health` e `/ready` respondem a "posso mandar tráfego?" e podem ficar em `127.0.0.1`; `/status` responde a "o que mostro pro jogador?" e é público por natureza. Hoje `/health` faz os três papéis e não faz o do meio direito — não toca o banco, que é o que mais quebra.
+Por que três e não dois: `/health` e `/ready` respondem a perguntas operacionais
+distintas; `/status` responde ao que pode ser mostrado ao jogador e é público
+por natureza. A separação já existe no código.
 
 **`/status` não expõe métrica sensível** (§12 do briefing): nada de IP, nada de `discordId`, nada de nome de conta, nada de estado interno da reserva. `players` e `queue` são contagens. `state` é um enum: `online`, `maintenance`, `starting`, `full`.
 
-`PLAT-20` cai junto: `state: "maintenance"` mais `message` é o mecanismo, e a fonte pode ser tão simples quanto uma variável de ambiente ou a presença de um arquivo — não precisa de banco, e é melhor que não precise, porque manutenção costuma ser justamente quando o banco está fora.
+`PLAT-20` usa `MAINTENANCE_MODE` e `MAINTENANCE_MESSAGE`. O caminho de manutenção
+não consulta banco para responder `/status` e barra a fila antes da validação do
+ticket.
 
 ---
 
@@ -416,10 +505,13 @@ A §13 do briefing lista seis cenários. Estado de cobertura em `queue.test.js` 
 | múltiplas instâncias do launcher | ❌ | Não é um caso da fila, é um caso do **ticket**: dois launchers com o mesmo `auth.json` disputam o mesmo `launchTicket` de uso único. Um ganha, o outro recebe `invalid_ticket` e não sabe por quê |
 | reserva expirada | ✅ | TTL de 3 min; quem conectou não perde por tempo |
 | desconexão | ✅ | `release` promove o próximo |
-| corrida de capacidade | ⚠️ | A fila é síncrona e monothread, então a corrida **não existe dentro dela**. A corrida real é `PLAT-13`: memória vs banco através de um restart |
+| corrida de capacidade | ✅ código | A fila é síncrona; no restart, a porta agora só abre após reidratar a ocupação do MariaDB (`PLAT-13`). Falta o cenário operacional com dois clientes |
 | expiração de ticket | ⚠️ | Coberto no nível HTTP só pela recusa (`server.http.test.js`); o caminho feliz exige banco e segue sem teste |
 
-A conclusão que interessa: **a fila em si está bem testada e o que falta está fora dela.** Os dois buracos reais são `PLAT-13` (persistência) e o caminho feliz de ticket, que precisa de banco. Detalhamento em [`LAUNCHER_PLATFORM_TEST_MATRIX.md`](../testing/LAUNCHER_PLATFORM_TEST_MATRIX.md).
+A conclusão que interessa: **a fila, o replay e a revogação exata estão cobertos
+estaticamente; o que falta está nas integrações reais.** Permanecem os cenários
+com MariaDB e clientes reais, inclusive reconnect e disconnect atrasado. Detalhamento em
+[`LAUNCHER_PLATFORM_TEST_MATRIX.md`](../testing/LAUNCHER_PLATFORM_TEST_MATRIX.md).
 
 ---
 
@@ -436,8 +528,8 @@ Os quatro requisitos da §14 do briefing, conferidos contra o código:
 
 Nada a corrigir aqui. **O problema está uma camada adiante**, em `game_sessions` (§3.3):
 
-- `PLAT-14` — falta revogar no `release`. Correção: `/internal/session/release` escreve `revoked_at` para as sessões da conta. A coluna existe desde a v8 e nunca foi usada.
-- `PLAT-15` — falta proteção de replay. A dificuldade é real e vale nomear: **sessão de jogo não pode ser de uso único**, porque o SkyMP resolve a cada conexão e um jogador que cai por crash precisa reconectar (está escrito na própria migration v8). Então a proteção não é "uma vez só", é uma das três: fixar a sessão ao IP na primeira resolução; recusar acima de um limiar de `resolve_count` em janela curta; ou revogar a anterior quando a mesma conta recebe sessão nova. **A terceira é a mais barata e a que menos quebra reconexão legítima** — e ela cai fora de graça junto com a correção de `PLAT-14`.
+- `PLAT-14` — resolvido por lease opaco: o banco guarda apenas SHA-256, e o `release` atualiza a linha que possui aquele hash exato.
+- `PLAT-15` — resolvido por sessão de master de uso único. Crash/reconnect volta ao launcher para obter uma sessão nova; a emissão nova revoga a anterior. Isso troca conveniência de reutilizar uma credencial de 12 h por uma fronteira verificável e sem heurística de IP.
 
 ---
 
@@ -450,12 +542,12 @@ Para incorporação ao [`AUTH_001_TRUST_BOUNDARY_INVENTORY.md`](../technical/AUT
 | OAuth | Client secret fora do instalador, `redirect_uri` em allowlist, `state` verificado | ✅ correto |
 | Tokens do launcher | Uso único, rotação, hash em repouso | ✅ correto |
 | IPC do Electron | `contextIsolation` ligado, `nodeIntegration` desligado, janela de OAuth sem preload, `will-navigate` e `setWindowOpenHandler` travados | ✅ correto |
-| URL remota | `downloadToFile` exige HTTPS | ⚠️ sem allowlist de host (`PLAT-08`) |
-| Feed de update | `httpGetJson` aceita **HTTP** e segue redirecionamento pra qualquer host | ❌ `PLAT-08` |
+| URL remota | HTTPS, porta padrão e host exato da allowlist | ✅ `PLAT-08` corrigido em 16/08/2026 |
+| Feed de update | Mesma política, reaplicada a cada redirect, com limite de cinco saltos | ✅ `PLAT-08` corrigido em 16/08/2026 |
 | Path traversal (manifesto) | `compareMods` casa contra arquivos locais listados, então não há travessia por aí | ✅ hoje; o v2 com `path` **precisa** da validação da §7 |
-| Zip slip | Nenhuma proteção na extração | ❌ `PLAT-07` |
+| Zip slip | Preflight do diretório central antes da extração, com teste de ZIP hostil real | ✅ `PLAT-07` corrigido em 16/08/2026 |
 | Bypass de checksum | Hash ausente aborta, hash confere antes de extrair | ✅ correto |
-| Replay de sessão | Sem controle | ❌ `PLAT-15` |
+| Replay de sessão | Consumo atômico único no master; sessão nova revoga a anterior | ✅ código, falta integração real `PLAT-15` |
 | API em localhost | Callback de OAuth em `127.0.0.1:19847`, só durante o login, com `state` | ✅ correto |
 | Segredos | `INTERNAL_API_SECRET` obrigatório via `requireEnv`, comparação em tempo constante; CI recusa `.env` versionado | ✅ correto |
 | Credencial em linha de comando | Não fazemos (`SEC-ARG-01` já verificado em 13/08) | ✅ não estamos expostos |
@@ -468,10 +560,13 @@ A §16 do briefing diz: *"Não migrar infraestrutura apenas por estética."* Est
 
 **O que fazer agora, porque é barato e ajuda a Fase 0:**
 
-- **Fechar `PLAT-27`** — três linhas em `modsManifest.js`. É o item de melhor relação custo/gravidade da auditoria inteira, e a Fase 0 vai gerar manifestos à mão, que é exatamente quando um manifesto vazio aparece.
+- **`PLAT-27` fechado em 16/08/2026** — o loader agora recusa manifesto vazio
+  antes de `/mods.json` responder.
 - **`deploy/versions.env`** com `SKYMP_COMMIT`, `HEAVY_RP_VERSION` e `MODPACK_VERSION`. É um arquivo de texto. Resolve `PLAT-22` e responde a pergunta que a Fase 0 vai fazer no primeiro problema: *"qual build era?"*. Sem isso, um bug reproduzido é um bug irreprodutível.
-- **`/ready`** (`PLAT-18`) — cinco linhas, e transforma "por que todo mundo recebe `internal_error`" em uma resposta HTTP.
-- **`/status`** (`PLAT-03`, `PLAT-19`, `PLAT-20`) — o launcher precisa dele para parar de mentir.
+- **`/ready`** (`PLAT-18`) — implementado com MariaDB, manifesto e manutenção.
+- **`/status`** (`PLAT-03`, `PLAT-19`, `PLAT-20`) — backend e consumo no
+  launcher implementados; falta validar visualmente todos os estados no
+  executável empacotado.
 
 **O que não fazer agora:**
 
@@ -480,7 +575,8 @@ A §16 do briefing diz: *"Não migrar infraestrutura apenas por estética."* Est
 - **Workflow de deploy.** Deploy automatizado para um servidor que ninguém acessa é cerimônia.
 - **Rollback automático.** E aqui vale a advertência da §18 do briefing, que está certa: **nunca prometer rollback automático de migration irreversível.** Nossas migrations são `CREATE TABLE IF NOT EXISTS` e `ALTER`; um `ALTER` que remove coluna não volta sozinho. O que dá pra prometer honestamente é: *o código volta; o banco volta só se a migration daquela versão for reversível, e o registro precisa dizer quais são.*
 
-**Ordem quando chegar a hora** (depois da Fase 0, não antes): pinagem → `/ready` → status → canais → staging/backup na instalação → só então empacotamento e deploy automatizado.
+**Ordem restante quando chegar a hora**: pinagem → canais → staging/backup na
+instalação → só então empacotamento e deploy automatizado.
 
 ---
 

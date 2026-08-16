@@ -78,6 +78,20 @@ desnecessário"*). O desenho da instância está em
 [`INVENTORY_FRAMEWORK.md`](../framework/INVENTORY_FRAMEWORK.md) §4; a tabela
 nasce com o primeiro consumidor, não antes.
 
+### 2.6 SkyUI e itens customizados não mudam a autoridade
+
+SkyUI será apresentação. O patch nativo planejado para criar/aplicar itens
+customizados server-side será um adapter de projeção: recebe definições e
+instâncias já validadas pelo domínio, aplica no Skyrim e reporta resultado. Ele
+não concede ao client autoridade para criar item, escolher metadata ou confirmar
+persistência.
+
+Stacks fungíveis continuam `(owner, base_id, count)`. UUID de instância entra
+somente para item que realmente possui identidade — encantamento customizado,
+durabilidade, nome próprio, proveniência, carga, poison, morph ou outra metadata
+persistente. O contrato de projeção terá versão/capabilities para coexistir com
+o caminho vanilla durante a implantação do patch.
+
 ---
 
 ## 3. A fronteira que esta decisão **não** fecha

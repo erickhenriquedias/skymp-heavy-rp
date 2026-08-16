@@ -391,6 +391,34 @@ function healthCheckAll() {
 }
 
 /**
+ * Falha o boot quando um módulo CORE explicitamente habilitado não chegou a
+ * RUNNING ou quando seu health check reprova. Módulos LAB continuam podendo
+ * falhar de forma degradada e aparecem no relatório normal de boot.
+ */
+function assertCoreReady() {
+  const issues = [];
+  const healthById = new Map(healthCheckAll().map(item => [item.id, item]));
+
+  for (const [id, mod] of _modules.entries()) {
+    if (mod.phase !== 'core' || process.env[mod.enabledBy] !== 'true') continue;
+    if (!_active.has(id)) {
+      issues.push(`${id}: estado=${_states.get(id) || STATES.REGISTERED}`);
+      continue;
+    }
+
+    const health = healthById.get(id);
+    if (!health || health.healthy !== true) {
+      issues.push(`${id}: healthCheck=${health?.error || String(health?.healthy)}`);
+    }
+  }
+
+  if (issues.length > 0) {
+    throw new Error(`[module-registry] Core sem readiness: ${issues.join('; ')}`);
+  }
+  return true;
+}
+
+/**
  * Lista todos os módulos registrados com seu status.
  */
 function list() {
@@ -418,7 +446,7 @@ function _reset() {
 module.exports = {
   STATES,
   register, isEnabled, getState,
-  bootAll, shutdownAll, healthCheckAll, list,
+  bootAll, shutdownAll, healthCheckAll, assertCoreReady, list,
   topologicalOrder,
   _reset
 };

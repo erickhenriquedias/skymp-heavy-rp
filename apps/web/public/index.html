@@ -253,14 +253,25 @@ async function saveExtraReviewNotes(id) {
   const row = (window._whitelistRows || []).find(r => r.id === id);
   const notes = prompt('Nota da revisão extra deste conceito:', row?.extra_review_notes || '');
   if (notes === null) return;
-  await apiPatch(`/api/whitelist/${id}`, { status: row.status, extra_review_notes: notes });
+  await apiPatch(`/api/whitelist/${id}`, {
+    status: row.status,
+    expected_status: row.status,
+    extra_review_notes: notes
+  });
   toast('Nota salva.', 'success');
   renderPage('whitelist');
 }
 
 async function reviewApp(id, status) {
+  const row = (window._whitelistRows || []).find(r => r.id === id);
+  if (!row) throw new Error('Aplicação não encontrada na fila atual.');
   const notes = status==='rejected' ? prompt('Motivo da rejeição (opcional):') : null;
-  await apiPatch(`/api/whitelist/${id}`, { status, reviewer_notes: notes });
+  if (status === 'rejected' && notes === null) return;
+  await apiPatch(`/api/whitelist/${id}`, {
+    status,
+    expected_status: row.status,
+    reviewer_notes: notes
+  });
   toast(status==='approved' ? '✓ Aprovado com sucesso!' : '✕ Rejeitado.', status==='approved'?'success':'error');
   renderPage('whitelist');
 }

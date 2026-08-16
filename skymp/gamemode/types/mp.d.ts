@@ -165,10 +165,10 @@ interface Mp {
    * `neighbors`, `type`, mais as criadas por `makeProperty`.
    *
    * ⚠️ **`'inventory'`** é **[DOC]** (`SKYMP_UPSTREAM_REFERENCE.md` §2.5) e
-   * **nunca foi exercitada por este projeto** — nem o formato de retorno é
-   * conhecido. A hipótese de trabalho é `{ entries: [{ baseId, count }] }`, e é
-   * hipótese: `corpse-probe.js` existe justamente para descobrir, e grava o
-   * retorno verbatim porque o formato observado vale tanto quanto o resultado.
+   * ainda não foi exercitada numa sessão real deste projeto. O formato
+   * `{ entries: [{ baseId, count, ...extraData }] }` foi confirmado no upstream
+   * fixado (`InventoryBinding.cpp` -> `Inventory::ToJson`); o teste in-game
+   * continua obrigatório para validar o artefato efetivamente executado.
    * As duas vezes em que este projeto assumiu formato de API sem ver — o `self`
    * do Papyrus e o require nu de `dotenv` — custaram caro e só apareceram em
    * jogo.
@@ -241,9 +241,8 @@ interface Mp {
    * [USO] Atores associados a um profileId. `0` devolve os atores que o
    * servidor reconheceu sem perfil.
    *
-   * É assim que descobrimos o profileId de um ator hoje: varrendo profileIds
-   * e procurando o actorId na lista (ver phase0-basic.js). Não é bonito, mas
-   * é o que a API oferece.
+   * Para o caminho ator -> profile, leia a property nativa
+   * `mp.get(actorId, 'profileId')` em O(1).
    */
   getActorsByProfileId(profileId: number): FormId[] | undefined;
 
@@ -289,15 +288,19 @@ interface Mp {
   // Conexões — [USO]
   // ───────────────────────────────────────────────────────────────────────
 
-  /** [USO] Se o userId está conectado. Base do nosso polling de conexão. */
+  /** [CPP] Eventos nativos do transporte; `userId` é o slot da conexão. */
+  on(event: 'connect', handler: (userId: number) => void): void;
+  on(event: 'disconnect', handler: (userId: number) => void): void;
+
+  /** [USO] Se o userId está conectado. */
   isConnected(userId: number): boolean;
 
   /**
    * [USO] Ator de um usuário conectado.
    *
    * ATENÇÃO: falha/retorna nada no momento em que a desconexão é detectada —
-   * a engine já destruiu o ator. Por isso phase0-basic.js mantém um cache
-   * `userActorMap` (userId → actorId) enquanto o jogador está conectado.
+   * a engine já destruiu o ator. Por isso `connection-monitor.js` mantém o
+   * `actorId` na sessão enquanto o jogador está conectado.
    */
   getUserActor(userId: number): FormId | undefined;
 
@@ -488,7 +491,7 @@ interface Mp {
    * recusa a conexão e o cliente recebe `loginFailedBanned`.
    *
    * É o ponto correto pra checagem de whitelist e ban — hoje `whitelist.js`
-   * faz isso por polling de conexão e `mp.kick` depois do fato.
+   * roda após o evento de conexão e usa `mp.kick` depois do fato.
    */
   onLoginAttempt: (profileId: number) => boolean;
 

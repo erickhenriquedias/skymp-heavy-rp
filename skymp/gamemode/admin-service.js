@@ -66,11 +66,7 @@ const skymp = require('./core/skymp-adapter');
 // inofensivo o bastante para moderador — mas separar em duas permissões daria a
 // este projeto uma permissão a mais para justificar sem que ninguém tivesse
 // pedido, e as duas ferramentas rodam na mesma sessão, pela mesma pessoa.
-const ROLE_PERMISSIONS = {
-  moderator: ['kick', 'teleport', 'view_audit', 'manage_whitelist'],
-  admin:     ['kick', 'teleport', 'view_audit', 'manage_whitelist', 'ban', 'add_item', 'set_gold', 'retire_character', 'manage_recipes', 'reveal_identity', 'run_world_probe'],
-  owner:     ['kick', 'teleport', 'view_audit', 'manage_whitelist', 'ban', 'add_item', 'set_gold', 'manage_staff', 'retire_character', 'manage_recipes', 'reveal_identity', 'run_world_probe']
-};
+const { ROLE_PERMISSIONS } = require('../packages/staff-access-policy');
 
 // Cache em memória: actorId → { role, permissions: Set<string> }
 // Carregado na whitelist a partir da tabela staff_roles (não de vip_level)

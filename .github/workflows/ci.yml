@@ -165,8 +165,8 @@ jobs:
   #
   # Roda em job próprio porque precisa clonar o upstream (~53 MB), e **sai cedo
   # quando não há patch**: clonar para verificar zero diffs é queimar minuto de
-  # runner para produzir a mesma resposta todo dia. Hoje ele sempre sai cedo, e
-  # essa é a situação preferida — ver patches/README.md.
+  # runner para produzir a mesma resposta todo dia. Com patch registrado, o job
+  # clona o pin e verifica cada diff — ver patches/README.md.
   #
   # `git apply --check` e não `git apply`: responde "aplicaria por inteiro?" sem
   # escrever nada. É o "nunca aplicar patch silenciosamente pela metade" do
@@ -213,3 +213,20 @@ jobs:
             fi
           done
           exit $falhou
+
+      - name: Aplicar patches no clone para os contract tests
+        if: steps.check.outputs.count != '0'
+        run: |
+          for f in $(node -e '
+            const m = require("./patches/manifest.json");
+            process.stdout.write(m.patches.map(p => p.file).join("\n"));
+          '); do
+            git -C /tmp/upstream-skymp apply "$GITHUB_WORKSPACE/patches/$f"
+          done
+
+      - name: Contract tests dos patches
+        if: steps.check.outputs.count != '0'
+        run: |
+          npm ci --prefix apps/launcher --ignore-scripts
+          SKYMP_SOURCE_DIR=/tmp/upstream-skymp \
+            node --test patches/*.contract.test.mjs

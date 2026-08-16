@@ -3,7 +3,6 @@ const identity = require('./identity-service');
 const { createRpChatService } = require('./rp-chat-service');
 const commandRegistry = require('./core/command-registry');
 const characterState = require('./core/character-state');
-const inventoryService = require('./inventory-service');
 
 // Cache em memoria dos personagens ativos no servidor
 // Chave: actorId (number), Valor: { characterId, firstName, lastName, accountId, profileId }
@@ -55,8 +54,6 @@ function removeActiveCharacter(actorId) {
     console.log(`[commands] Removed cached character for actor ${actorId.toString(16)}: ${char.firstName} ${char.lastName}`);
     identity.forgetKnownIdentities(char.characterId);
     characterState.cleanup(char.characterId);
-    inventoryService.clearSyncCache(char.characterId);
-
     // O staffCache do admin-service e chaveado por actorId, nao por conta — e o
     // SkyMP reaproveita actorId entre sessoes. Sem limpar aqui, o cargo ficava
     // preso ao slot: quem entrasse depois no mesmo actorId herdava `ban`,

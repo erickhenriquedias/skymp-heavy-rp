@@ -104,23 +104,29 @@ export function parsePluginHeader(buffer) {
  */
 export function compareMods({ serverMods, localFiles, hashOf }) {
   if (!Array.isArray(serverMods)) {
-    return { success: false, error: 'Manifesto invalido do servidor.' };
+    const error = 'Manifesto invalido do servidor.';
+    return { success: false, error, problems: [error] };
   }
 
   // Windows não distingue caixa; o manifesto é gerado noutra máquina.
   const porNomeMinusculo = new Map(localFiles.map(f => [f.toLowerCase(), f]));
+  const problems = [];
 
   for (const mod of serverMods) {
     const local = porNomeMinusculo.get(String(mod.filename).toLowerCase());
     if (!local) {
-      return { success: false, error: `Mod faltando: ${mod.filename}` };
+      problems.push(`Mod faltando: ${mod.filename}`);
+      continue;
     }
     if (hashOf(local) !== mod.hash) {
-      return { success: false, error: `O mod ${mod.filename} esta modificado ou corrompido!` };
+      problems.push(`O mod ${mod.filename} esta modificado ou corrompido!`);
     }
   }
 
-  return { success: true };
+  if (problems.length > 0) {
+    return { success: false, error: problems[0], problems };
+  }
+  return { success: true, problems: [] };
 }
 
 /**

@@ -30,6 +30,15 @@ Regras que o código já aplica (`apps/launcher/electron/main.ts`):
 
 - **Hash ausente aborta.** Tanto no cliente quanto em cada parte do modpack, um manifesto sem `sha256` faz o download falhar em vez de instalar sem verificação. Isso é deliberado: um manifesto malformado é indistinguível de um comprometido.
 - **SHA-256 confere antes de extrair**, nunca depois.
+- **O diretório central do ZIP é inspecionado antes de extrair.** O launcher
+  recusa caminhos absolutos ou com `..`, nomes especiais/ADS do Windows,
+  colisões que apontariam para o mesmo arquivo, symlinks/junctions e pacotes
+  acima dos limites declarados. Também recusa atravessar link já existente no
+  destino.
+- **Feed, arquivo e redirecionamento usam uma allowlist exata de origem.** Só
+  HTTPS na porta padrão e hosts oficiais de GitHub Releases são aceitos;
+  credenciais na URL, domínios parecidos e redirects para terceiros são
+  recusados. Cada salto é revalidado e o limite é cinco.
 - **Download em partes** com `contentSig` por parte, pra pular pedaços que não mudaram — o modpack é grande demais pra rebaixar inteiro a cada versão.
 - **Carimbos locais** (`skymp_client_version.txt`, `skymp_mods_version.txt`, `skymp_mods_parts.json`) na pasta do jogo dizem o que está instalado sem precisar re-hashear tudo.
 
@@ -37,7 +46,7 @@ Regras que o código já aplica (`apps/launcher/electron/main.ts`):
 
 Antes de jogar, o launcher roda dois passos:
 
-1. **`verify-mods`** — baixa `http://<SERVER_IP>:<API_PORT>/mods.json`, no formato `{ mods: [{ filename, hash }], loadOrder: [...] }`, e compara o hash de cada arquivo correspondente em `Data/`. **Este passo usa MD5**, não SHA-256 — é uma checagem de integridade/paridade, não uma barreira criptográfica, e é diferente do SHA-256 usado no download (seção 2).
+1. **`verify-mods`** — baixa `http://<SERVER_IP>:<API_PORT>/mods.json`, no formato `{ manifestVersion: 1, channel, build, mods: [{ filename, hash }], loadOrder: [...] }`, e compara o hash de cada arquivo correspondente em `Data/`. **Este passo usa MD5**, não SHA-256 — é uma checagem de integridade/paridade, não uma barreira criptográfica, e é diferente do SHA-256 usado no download (seção 2). Cada arquivo exigido é lido por stream e os hashes são calculados sequencialmente, sem carregar uma BSA inteira na memória. Manifesto legado, versão futura, canal desconhecido ou build vazio é recusado pelo servidor e novamente pelo launcher.
 2. **`analyze-plugins`** — lê o header de cada `.esp`/`.esl`/`.esm`, confere que todo master existe localmente e aparece **antes** do dependente na ordem informada pelo servidor.
 
 Os dois juntos é que fecham o contrato de FormID descrito em `docs/technical/MODS_AND_GAMEMODE_CONTRACT.md` seção 3: o (1) garante conteúdo igual, o (2) garante ordem igual.
@@ -49,12 +58,21 @@ Quem serve esses endpoints é o **`apps/game-api`**.
 O manifesto não é gerado sob demanda — hashear dezenas de GB dentro de uma requisição HTTP seria lento e daria margem a servir um manifesto inconsistente enquanto alguém copia arquivos pra pasta. Gere offline, a partir da pasta `Data/` de referência do servidor:
 
 ```bash
-cd apps/game-api && node scripts/generate-mods-manifest.js "D:/SteamLibrary/steamapps/common/Skyrim Special Edition/Data" --plugins-txt "%LOCALAPPDATA%/Skyrim Special Edition/plugins.txt"
+cd apps/game-api && node scripts/generate-mods-manifest.js "D:/SteamLibrary/steamapps/common/Skyrim Special Edition/Data" --plugins-txt "%LOCALAPPDATA%/Skyrim Special Edition/plugins.txt" --channel stable --build "2026.08.16"
 ```
 
 `--plugins-txt` importa: sem ele o script infere a load order pela ordem alfabética do diretório, que **não** é a load order real do Skyrim. Serve pra teste local, mas em produção geraria um manifesto que reprova clientes corretos. O script avisa alto quando isso acontece.
 
-Se o manifesto estiver ausente ou corrompido, `/mods.json` responde **503**, nunca uma lista vazia — lista vazia passaria na verificação de paridade do launcher e deixaria qualquer modpack entrar, que é o oposto do propósito.
+`--channel` aceita apenas `development`, `beta` ou `stable`. `--build` identifica
+o modpack publicado. Sem argumentos, o gerador usa `development` e
+`unversioned` para desenvolvimento local; uma publicação deve informar ambos.
+O caminho absoluto da pasta `Data` usada na geração não é gravado no JSON
+público.
+
+Se o manifesto estiver ausente, corrompido, com `mods` vazio ou com `loadOrder`
+vazia, `/mods.json` responde **503**, nunca uma lista vazia — lista vazia
+passaria na verificação de paridade do launcher e deixaria qualquer modpack
+entrar, que é o oposto do propósito.
 
 ### A fila
 
@@ -74,11 +92,32 @@ Junto com o perfil, o painel devolve um **`launchTicket`** (`launch_tickets`, mi
 
 ### O que acontece com o ticket depois
 
-O `launch-game` grava o ticket de sessão em `skymp_config.json` como `session`. Isso não é invenção nossa: é o campo que o servidor SkyMP lê quando `offlineMode: false`. Ele então resolve a sessão contra o master API — que passou a ser o nosso próprio painel (`ARCHITECTURE.md` 1.2.1) — e o `id` que voltar vira o `profileId` do gamemode.
+O `launch-game` grava o ticket de sessão em `skymp5-client-settings.txt` como `gameData.session`. O patch registrado `launcher-session-settings-auth` faz o `authService` do cliente tratá-lo como `AuthGameData.remote`; após conectar, o cliente envia essa sessão ao servidor SkyMP. Com `offlineMode: false`, o servidor resolve a sessão contra o master API — que é o nosso painel (`ARCHITECTURE.md` 1.2.1) — e o `id` devolvido vira o `profileId` autoritativo do gamemode. Ver `AUTH_003_LAUNCHER_SESSION_HANDOFF.md`.
 
-É esse desvio que tira a identidade das mãos do cliente. Com `offlineMode: true`, o cliente declararia o próprio `profileId` no mesmo arquivo e o servidor acreditaria.
+É esse desvio que tira a identidade das mãos do cliente. Com `offlineMode: true`, o cliente poderia declarar `gameData.profileId` e o servidor acreditaria; o launcher online remove esse campo.
 
-Cadeia completa: **Discord** → painel (`launch_tickets`) → fila (`game_sessions`) → `skymp_config.json` → servidor SkyMP → master API → `profileId`.
+Cadeia completa: **Discord** → painel (`launch_tickets`) → fila (`game_sessions`) → `skymp5-client-settings.txt.gameData.session` → cliente SkyMP → servidor SkyMP → master API → `profileId`.
+
+O token de `game_sessions` é resolvido **uma única vez**, por `UPDATE`
+condicional atômico. Depois que o Actor recebe o `profileId`, o gamemode pede à
+game-api um lease opaco exclusivo daquela conexão antes de consultar a
+whitelist. No disconnect ele devolve apenas esse lease; o banco guarda somente
+SHA-256 e revoga a linha exata. Uma queda exige obter uma sessão nova pelo
+launcher. Isso impede replay indefinido e faz um disconnect atrasado da conexão
+anterior virar no-op, sem derrubar a reconexão atual.
+
+Credenciais vencidas não permanecem indefinidamente no MariaDB. A game-api
+executa retenção no boot e, com tráfego de fila, no máximo uma vez por intervalo:
+por padrão conserva tickets por 24 horas e sessões por 7 dias após `expires_at`,
+apagando até 10 lotes de 500 linhas por tabela. Os valores são configuráveis no
+`.env.example`; a limpeza usa os índices de expiração das migrations v6 e v8.
+
+No restart, a game-api consulta sessões válidas antes de abrir sua porta e
+reidrata somente a ocupação — nunca o token, que existe no banco apenas como
+hash. O master API confirma conta + `sessionId` em
+`POST /internal/session/connected`; se essa confirmação falhar, o login retorna
+503. Como o token já foi consumido de forma segura, o retry operacional usa uma
+sessão nova emitida pelo launcher, não reutiliza a credencial anterior.
 
 ---
 

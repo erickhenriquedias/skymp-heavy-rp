@@ -85,12 +85,12 @@ chamador é a UI.
 
 | Permissão | Risco | O que autoriza | Existe hoje? |
 |---|---|---|---|
-| `whitelist.view` | 🟢 | ler a fila de aplicações | painel: sem gate |
-| `whitelist.review` | 🟡 | mover entre estados, escrever parecer | painel: **sem gate** |
-| `whitelist.approve` | 🟡 | aprovar (libera entrada no servidor) | painel: **sem gate** |
+| `whitelist.view` | 🟢 | ler a fila de aplicações | ✅ guard legado `manage_whitelist` |
+| `whitelist.review` | 🟡 | mover entre estados, escrever parecer | ✅ guard legado `manage_whitelist` |
+| `whitelist.approve` | 🟡 | aprovar (libera entrada no servidor) | ✅ guard legado `manage_whitelist` |
 | `staff.view` | 🟢 | ver equipe e cargos | ❌ |
 | `staff.manage` | 🔴 | conceder/revogar cargo e permissão | jogo: `manage_staff` ✅ |
-| `factions.view` / `factions.manage` | 🟢 / 🟡 | facções | view sem gate · manage ❌ |
+| `factions.view` / `factions.manage` | 🟢 / 🟡 | facções | view exige cargo conhecido · manage ❌ |
 | `world.probe` | 🟡 | censo de fauna e sonda de cadáver | jogo: `run_world_probe` ✅ |
 | `crafting.recipes.manage` | 🔴 | criar/editar receita (regra permanente) | jogo: `manage_recipes` ✅ |
 
@@ -104,7 +104,7 @@ chamador é a UI.
 | `server.restart` | 🔴 | reiniciar processo | **não deve existir até a §14 do ADMIN_PLATFORM** |
 | `modules.view` | 🟢 | estado dos módulos do registry | ❌ |
 | `modules.toggle` | 🔴 | ligar/desligar módulo | ❌ — hoje é `ENABLE_*` no `.env` + restart |
-| `logs.view` | 🟢 | auditoria administrativa | jogo: `view_audit` (declarada, **nada verifica**) |
+| `logs.view` | 🟢 | auditoria administrativa | ✅ painel verifica `view_audit` |
 | `logs.view.security` | 🔴 | eventos sensíveis: revelação de identidade, mudança de cargo, negações | ❌ |
 
 `logs.view.security` é escopo separado por um motivo concreto: o `audit_logs`
@@ -133,13 +133,14 @@ possível para um renome.
 | `run_world_probe` | `world.probe` | `fauna-census.js` (×2), `corpse-probe.js` |
 | `manage_recipes` | `crafting.recipes.manage` | `crafting-service.js` (×2) |
 | `manage_staff` | `staff.manage` | `governance-service.js`, `market-stalls-service.js` (×2) |
-| `view_audit` | `logs.view` | nenhum — **órfã** |
-| `manage_whitelist` | `whitelist.review` | nenhum — **órfã** |
+| `view_audit` | `logs.view` | painel: dashboard, audit e crash reports |
+| `manage_whitelist` | `whitelist.review` | painel: leitura e revisão da whitelist |
 
-As três órfãs não são renomeadas: são **decididas**. `players.ban` e
-`whitelist.review` ganham implementação (painel); `logs.view` idem. Nenhuma
-permissão pode existir no catálogo sem pelo menos um verificador — e isso vira
-teste (`ADMIN_SECURITY_MATRIX` §3.1).
+`view_audit` e `manage_whitelist` deixaram de ser órfãs em 16/08/2026: o painel
+as verifica por middleware, usando a mesma fonte de política do gamemode em
+`skymp/packages/staff-access-policy.js`. `players.ban` continua órfã. A troca
+dos nomes legados pelos nomes de domínio acima permanece uma migration separada;
+misturar renome e fechamento do gate tornaria uma regressão difícil de isolar.
 
 ---
 

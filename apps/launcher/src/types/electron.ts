@@ -6,6 +6,14 @@ export interface AuthData {
   loginDate: string;
 }
 
+export interface PublicServerStatus {
+  state: 'online' | 'full' | 'starting' | 'maintenance' | 'offline';
+  players: number;
+  capacity: number;
+  queue: number;
+  message: string | null;
+}
+
 export interface ElectronAPI {
   windowMinimize: () => void;
   windowClose: () => void;
@@ -18,10 +26,11 @@ export interface ElectronAPI {
   discordLogin: () => Promise<AuthData | null>;
   discordLogout: () => Promise<boolean>;
   getAuthStatus: () => Promise<AuthData | null>;
+  getServerStatus: () => Promise<PublicServerStatus>;
   joinQueue: () => Promise<any>;
   pollQueue: () => Promise<any>;
   getLocalPlugins: (folderPath: string) => Promise<any>;
-  verifyMods: (folderPath: string) => Promise<{ success: boolean; error?: string; loadOrder?: string[] }>;
+  verifyMods: (folderPath: string) => Promise<{ success: boolean; error?: string; problems?: string[]; loadOrder?: string[] }>;
   analyzePlugins: (folderPath: string, serverLoadOrder?: string[]) => Promise<{ ok: boolean; problems: string[]; plugins: any[] }>;
   syncLoadorder: (folderPath: string, serverLoadOrder: string[]) => Promise<boolean>;
   isGameRunning: () => Promise<boolean>;

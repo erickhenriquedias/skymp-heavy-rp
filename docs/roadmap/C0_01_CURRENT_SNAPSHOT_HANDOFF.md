@@ -11,7 +11,7 @@ A árvore já estava modificada antes do início de AUTH-001. Este snapshot cont
 Principais grupos:
 
 - `core/ui-event-*`, governance e player panel: contrato CEF e validação progressiva.
-- `core/connection-monitor*`: polling de conexão protegido contra resposta assíncrona obsoleta.
+- `core/connection-monitor*`: eventos nativos de conexão, retry apenas por sessão pendente e proteção contra resposta assíncrona obsoleta.
 - `core/institutional-treasury-service*`, `core/regional-market-transaction-service*`, migrations v11-v13: transação e idempotência.
 - `voip-service*`: limite de protocolo, papéis sender/listener e separação por célula.
 - `docs/roadmap/TASK_001` a `TASK_006`: estado e testes de cada entrega.

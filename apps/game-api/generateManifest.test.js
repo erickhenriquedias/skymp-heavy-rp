@@ -73,6 +73,10 @@ describe('--only-load-order restringe o manifesto à load order', () => {
     assert.ok(r.ok, r.saida);
 
     const m = JSON.parse(fs.readFileSync(out, 'utf8'));
+    assert.equal(m.manifestVersion, 1);
+    assert.equal(m.channel, 'development');
+    assert.equal(m.build, 'unversioned');
+    assert.equal(m.sourceDataDir, undefined, 'manifesto público não pode expor path da máquina geradora');
     assert.equal(m.mods.length, 5, 'sem a flag, tudo que e plugin ou BSA entra');
     assert.equal(m.loadOrder.length, 3);
     assert.ok(
@@ -138,5 +142,46 @@ describe('load order sem plugins.txt é marcada como não confiável', () => {
       m.loadOrderSource, /NAO CONFIAVEL/,
       'quem ler o manifesto depois precisa saber que a ordem foi inferida por nome de arquivo'
     );
+  });
+});
+
+describe('envelope versionado do manifesto', () => {
+  it('grava canal e build explícitos', () => {
+    const out = path.join(tmp, 'stable.json');
+    const r = rodar([
+      dataDir,
+      '--plugins-txt', path.join(tmp, 'plugins.txt'),
+      '--out', out,
+      '--channel', 'stable',
+      '--build', '2026.08.16-rc1'
+    ]);
+    assert.ok(r.ok, r.saida);
+    const m = JSON.parse(fs.readFileSync(out, 'utf8'));
+    assert.deepEqual(
+      { manifestVersion: m.manifestVersion, channel: m.channel, build: m.build },
+      { manifestVersion: 1, channel: 'stable', build: '2026.08.16-rc1' }
+    );
+  });
+
+  it('recusa canal desconhecido e build vazio', () => {
+    const invalidChannel = rodar([dataDir, '--channel', 'nightly']);
+    const invalidBuild = rodar([dataDir, '--build', '']);
+    assert.equal(invalidChannel.ok, false);
+    assert.match(invalidChannel.saida, /Canal invalido/);
+    assert.equal(invalidBuild.ok, false);
+    assert.match(invalidBuild.saida, /--build precisa/);
+  });
+
+  it('não publica o caminho absoluto da máquina geradora', () => {
+    const out = path.join(tmp, 'sem-path-privado.json');
+    const r = rodar([
+      dataDir,
+      '--plugins-txt', path.join(tmp, 'plugins.txt'),
+      '--out', out
+    ]);
+    assert.ok(r.ok, r.saida);
+    const m = JSON.parse(fs.readFileSync(out, 'utf8'));
+    assert.equal(m.sourceDataDir, undefined);
+    assert.equal(JSON.stringify(m).includes(dataDir), false);
   });
 });

@@ -219,15 +219,16 @@ Estados, substituindo os três de hoje (`pending`, `approved`, `rejected`):
 
 Mudanças que os estados novos obrigam:
 
-1. **`reviewed_by` passa a ser `account_id`.** Hoje a coluna é
-   `VARCHAR(128)` e **nunca é preenchida** — o `PATCH` grava `reviewer_notes` e
-   `reviewed_at`, e o revisor só aparece indiretamente em `audit_logs`. Uma FK
-   para `accounts` responde "quem aprovou?" com um `JOIN`, não com uma busca em
-   texto.
-2. **`UNDER_REVIEW` é o que impede duas pessoas revisarem a mesma ficha.** É o
-   caso de concorrência real do painel: transição só vale se o estado anterior for
-   o esperado, e quem perder a corrida recebe "outro revisor assumiu", não um
-   `ok:true` mentiroso.
+1. **`reviewed_by` passa a ser `account_id`.** Hoje a coluna ainda é
+   `VARCHAR(128)`; desde 16/08/2026 o `PATCH` a preenche com o nome exibido do
+   revisor, enquanto `audit_logs.actor_account_id` guarda a identidade estável.
+   A mudança futura para FK elimina a duplicidade e responde "quem aprovou?"
+   com um `JOIN`, não com busca em texto.
+2. **`UNDER_REVIEW` permite mostrar quem assumiu a ficha.** A proteção contra
+   perda de atualização já existe: a UI envia `expected_status`, a transação
+   trava a candidatura, e quem perder a corrida recebe conflito em vez de um
+   `ok:true` mentiroso. O estado novo ainda é necessário para reserva explícita
+   e visível antes da decisão final.
 3. **`NEEDS_CHANGES` precisa de reenvio.** A regra atual bloqueia nova aplicação
    com `pending` ou `approved` ativa; `NEEDS_CHANGES` tem de deixar reenviar,
    mantendo a aplicação original ligada à nova para o histórico.

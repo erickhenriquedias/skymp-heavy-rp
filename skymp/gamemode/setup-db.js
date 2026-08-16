@@ -1,6 +1,7 @@
 const mysql = require('mysql2/promise');
 const fs = require('fs');
 const path = require('path');
+const { runMigrations } = require('./core/migration-runner');
 
 async function run() {
   const configPath = path.resolve(__dirname, '../config/database.local.json');
@@ -16,33 +17,44 @@ async function run() {
   }
 
   const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-  const schemaSql = fs.readFileSync(schemaPath, 'utf8');
-
   console.log(`Attempting to connect to MySQL at ${config.host}:${config.port} as ${config.user}...`);
 
+  let connection;
   try {
-    // Conecta inicialmente sem especificar banco de dados para podermos cria-lo
-    const connection = await mysql.createConnection({
+    if ((config.database || 'skymp_rp') !== 'skymp_rp') {
+      throw new Error('database.local.json deve apontar para o banco oficial skymp_rp');
+    }
+
+    // Conecta sem database para conseguir criar o banco no primeiro setup.
+    connection = await mysql.createConnection({
       host: config.host || '127.0.0.1',
       port: config.port || 3306,
       user: config.user || 'root',
-      password: config.password || '',
-      multipleStatements: true // Permite rodar varias queries juntas
+      password: config.password || ''
     });
 
-    console.log('Connected successfully. Running schema.sql statements...');
-    
-    // Executa as queries do schema.sql
-    await connection.query(schemaSql);
-    
-    console.log('Database and tables created successfully in "skymp_rp"!');
-    await connection.end();
-    process.exit(0);
+    try {
+      await connection.query('USE `skymp_rp`');
+    } catch (error) {
+      if (error.code !== 'ER_BAD_DB_ERROR') throw error;
+      await connection.query(
+        'CREATE DATABASE IF NOT EXISTS `skymp_rp` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci'
+      );
+      await connection.query('USE `skymp_rp`');
+    }
+
+    const result = await runMigrations({ connection, schemaPath });
+    console.log(
+      `Database ready at migration v${result.currentVersion} ` +
+      `(${result.applied.length} applied now).`
+    );
   } catch (err) {
     console.error('Failed to set up database:', err.message);
     console.log('\n--- Troubleshooting ---');
     console.log('Please make sure your MySQL/MariaDB server is running and the credentials in skymp/config/database.local.json are correct.');
-    process.exit(1);
+    process.exitCode = 1;
+  } finally {
+    if (connection) await connection.end();
   }
 }
 

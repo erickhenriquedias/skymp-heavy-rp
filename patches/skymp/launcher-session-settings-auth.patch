@@ -1,0 +1,96 @@
+diff --git a/skymp5-client/src/features/authModel.ts b/skymp5-client/src/features/authModel.ts
+index 55425e2..a8d0aa0 100644
+--- a/skymp5-client/src/features/authModel.ts
++++ b/skymp5-client/src/features/authModel.ts
+@@ -16,3 +16,40 @@ export interface AuthGameData {
+ };
+ 
+ export const authGameDataStorageKey = "authGameData";
++
++const minExternalSessionLength = 32;
++const maxExternalSessionLength = 512;
++
++export function getAuthGameDataFromSettings(settingsGameData: unknown): AuthGameData | null {
++  if (!settingsGameData || typeof settingsGameData !== "object") {
++    return null;
++  }
++
++  const candidate = settingsGameData as Record<string, unknown>;
++  const session = candidate.session;
++
++  // Prefer a server-resolved session over profileId when both are present.
++  // A stale profileId must never downgrade an online launch to offline auth.
++  if (
++    typeof session === "string" &&
++    session.length >= minExternalSessionLength &&
++    session.length <= maxExternalSessionLength &&
++    !/\s/.test(session)
++  ) {
++    return {
++      remote: {
++        session,
++        masterApiId: 0,
++        discordUsername: null,
++        discordDiscriminator: null,
++        discordAvatar: null,
++      },
++    };
++  }
++
++  if (Number.isInteger(candidate.profileId)) {
++    return { local: { profileId: candidate.profileId as number } };
++  }
++
++  return null;
++}
+diff --git a/skymp5-client/src/services/services/authService.ts b/skymp5-client/src/services/services/authService.ts
+index ef287c6..502d8a0 100644
+--- a/skymp5-client/src/services/services/authService.ts
++++ b/skymp5-client/src/services/services/authService.ts
+@@ -1,6 +1,6 @@
+ import * as crypto from "crypto";
+ import * as fs from "fs";
+-import { AuthGameData, RemoteAuthGameData, authGameDataStorageKey } from "../../features/authModel";
++import { AuthGameData, RemoteAuthGameData, authGameDataStorageKey, getAuthGameDataFromSettings } from "../../features/authModel";
+ import { FunctionInfo } from "../../lib/functionInfo";
+ import { ClientListener, CombinedController, Sp } from "./clientListener";
+ import { BrowserMessageEvent, Menu, browser } from "skyrimPlatform";
+@@ -129,12 +129,17 @@ export class AuthService extends ClientListener {
+     logTrace(this, `Received authNeeded event`);
+ 
+     const settingsGameData = this.sp.settings["skymp5-client"]["gameData"] as any;
+-    const isOfflineMode = Number.isInteger(settingsGameData?.profileId);
+-    if (isOfflineMode) {
+-      logTrace(this, `Offline mode detected in settings, emitting auth event with authGameData.local`);
+-      this.controller.emitter.emit("authAttempt", { authGameData: { local: { profileId: settingsGameData.profileId } } });
++    const settingsAuthGameData = getAuthGameDataFromSettings(settingsGameData);
++    if (settingsAuthGameData) {
++      logTrace(
++        this,
++        settingsAuthGameData.remote
++          ? `Remote session detected in settings, emitting auth event with authGameData.remote`
++          : `Offline mode detected in settings, emitting auth event with authGameData.local`
++      );
++      this.controller.emitter.emit("authAttempt", { authGameData: settingsAuthGameData });
+     } else {
+-      logTrace(this, `No offline mode detectted in settings, regular auth needed`);
++      logTrace(this, `No auth data detected in settings, regular auth needed`);
+       this.setListenBrowserMessage(true, 'authNeeded event received');
+ 
+       this.trigger.authNeededFired = true;
+diff --git a/skymp5-server/ts/systems/login.ts b/skymp5-server/ts/systems/login.ts
+index cfb2a4d..2175b63 100644
+--- a/skymp5-server/ts/systems/login.ts
++++ b/skymp5-server/ts/systems/login.ts
+@@ -228,7 +228,10 @@ export class LoginSystem implements System {
+       })()
+         .catch((err) => {
+           loginErrorsCounter.inc({ reason: err?.message || "unknown" });
+-          console.error("Error logging in client:", JSON.stringify(gameData), err)
++          console.error("Error logging in client:", {
++            hasSession: typeof gameData?.session === "string",
++            hasProfileId: typeof gameData?.profileId === "number",
++          }, err)
+         });
+     } else if (this.offlineMode === true && gameData && typeof gameData.profileId === "number") {
+       const profileId = gameData.profileId;

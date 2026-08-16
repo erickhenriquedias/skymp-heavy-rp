@@ -5,7 +5,9 @@ const express = require('express');
 const app = express();
 const voiceChannels = require('./voiceChannels');
 const moderationLog = require('./moderationLog');
+const gameAccess = require('./gameAccess');
 const { deployCommands } = require('./deploy-commands');
+const { createSlidingWindowRateLimiter } = require('../../skymp/packages/sliding-rate-limiter');
 
 app.use(express.json());
 
@@ -18,6 +20,11 @@ const WHITELIST_ROLE_ID = process.env.WHITELIST_ROLE_ID;
 const INTERNAL_API_SECRET = process.env.INTERNAL_API_SECRET;
 const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID;
 const VOICE_CATEGORY_ID = process.env.VOICE_CATEGORY_ID;
+const PANEL_INTERNAL_URL = process.env.PANEL_INTERNAL_URL || 'http://127.0.0.1:3001';
+const GAME_ACCESS_ROLE_IDS = gameAccess.parseGameAccessRoleIds(
+    WHITELIST_ROLE_ID,
+    process.env.GAME_ACCESS_ROLE_IDS
+);
 // Canal de log de moderação. Sem ele o endpoint continua respondendo 202 e não
 // envia nada: quem configura o servidor decide se quer o canal, e um servidor
 // sem canal não pode ver `/permakill` falhar por causa disso.
@@ -71,14 +78,39 @@ client.on('voiceStateUpdate', (oldState, newState) => {
     voiceChannels.handleVoiceStateUpdate(oldState, newState);
 });
 
+async function notifyGameAccess(member) {
+    const access = gameAccess.getMemberGameAccess(member, GAME_ACCESS_ROLE_IDS);
+    const response = await fetch(`${PANEL_INTERNAL_URL}/internal/discord-role-access`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-Internal-Secret': INTERNAL_API_SECRET
+        },
+        body: JSON.stringify({
+            discord_id: member.id,
+            eligible: access.eligible,
+            matched_role_id: access.matchedRoleId
+        })
+    });
+    if (!response.ok && response.status !== 404) {
+        throw new Error(`painel respondeu HTTP ${response.status}`);
+    }
+}
+
+client.on('guildMemberUpdate', (oldMember, newMember) => {
+    if (newMember.guild.id !== GUILD_ID) return;
+    const before = gameAccess.getMemberGameAccess(oldMember, GAME_ACCESS_ROLE_IDS);
+    const after = gameAccess.getMemberGameAccess(newMember, GAME_ACCESS_ROLE_IDS);
+    if (before.eligible === after.eligible && before.matchedRoleId === after.matchedRoleId) return;
+    notifyGameAccess(newMember).catch((err) => {
+        console.error(`[discord-bot] Falha ao sincronizar acesso de ${newMember.id}: ${err.message}`);
+    });
+});
+
 // ── Rate limiting simples (janela deslizante em memória) ────────────────────
-const rateLimitBuckets = new Map();
+const rateLimiter = createSlidingWindowRateLimiter();
 function isRateLimited(key, maxRequests, windowMs) {
-    const now = Date.now();
-    const timestamps = (rateLimitBuckets.get(key) || []).filter((t) => now - t < windowMs);
-    timestamps.push(now);
-    rateLimitBuckets.set(key, timestamps);
-    return timestamps.length > maxRequests;
+    return rateLimiter.isLimited(key, maxRequests, windowMs);
 }
 
 // Comparação em tempo constante para evitar timing attacks no secret interno
@@ -107,16 +139,16 @@ app.post('/api/sync-role', async (req, res) => {
     if (!discord_id) return res.status(400).json({ error: 'Missing discord_id' });
     if (!['approved', 'rejected', 'pending'].includes(status)) return res.status(400).json({ error: 'Invalid status' });
     if (!GUILD_ID || !WHITELIST_ROLE_ID) return res.status(500).json({ error: 'GUILD_ID or WHITELIST_ROLE_ID not configured' });
-    
+
     try {
         const guild = await client.guilds.fetch(GUILD_ID);
         const member = await guild.members.fetch(discord_id).catch(() => null);
-        
+
         if (!member) {
             console.log(`[discord-bot] Membro ${discord_id} não encontrado na guild.`);
             return res.status(404).json({ error: 'Member not found in guild' });
         }
-        
+
         if (status === 'approved') {
             await member.roles.add(WHITELIST_ROLE_ID);
             console.log(`[discord-bot] Cargo adicionado para ${discord_id}`);
@@ -124,11 +156,38 @@ app.post('/api/sync-role', async (req, res) => {
             await member.roles.remove(WHITELIST_ROLE_ID);
             console.log(`[discord-bot] Cargo removido para ${discord_id}`);
         }
-        
+
         res.json({ ok: true });
     } catch (err) {
         console.error(`[discord-bot] Erro ao sincronizar:`, err);
         res.status(500).json({ error: 'Erro interno do servidor' });
+    }
+});
+
+// Consulta interna usada no login do launcher. O cliente nunca informa roles:
+// quem consulta a guild e decide é o bot autenticado do servidor.
+app.post('/api/check-game-access', async (req, res) => {
+    const ip = req.ip || req.socket.remoteAddress || 'unknown';
+    if (isRateLimited(`check-game-access:${ip}`, 60, 60 * 1000)) {
+        return res.status(429).json({ error: 'Too many requests' });
+    }
+    if (!isValidInternalSecret(req.get('X-Internal-Secret'))) {
+        return res.status(401).json({ error: 'Unauthorized' });
+    }
+    const discordId = String((req.body || {}).discord_id || '');
+    if (!/^\d{5,32}$/.test(discordId)) {
+        return res.status(400).json({ error: 'Invalid discord_id' });
+    }
+
+    try {
+        const guild = await client.guilds.fetch(GUILD_ID);
+        const member = await guild.members.fetch(discordId).catch(() => null);
+        if (!member) return res.json({ eligible: false, matched_role_id: null });
+        const access = gameAccess.getMemberGameAccess(member, GAME_ACCESS_ROLE_IDS);
+        res.json({ eligible: access.eligible, matched_role_id: access.matchedRoleId });
+    } catch (err) {
+        console.error('[discord-bot] Erro ao consultar cargo de acesso:', err);
+        res.status(503).json({ error: 'Discord unavailable' });
     }
 });
 

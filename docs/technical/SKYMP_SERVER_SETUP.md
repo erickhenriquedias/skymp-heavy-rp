@@ -98,13 +98,14 @@ Campos minimos a revisar:
 ### Producao
 
 - Avaliar `databaseDriver=mongodb`.
-- Usar MongoDB separado do PostgreSQL da plataforma RP.
+- Usar MongoDB separado do MariaDB da plataforma RP, somente se o driver de
+  change forms for adotado após testes.
 - Criar backup e restore testados antes da beta publica.
 
 ### Separacao Obrigatoria
 
 - Estado de mundo SkyMP: driver nativo SkyMP.
-- Plataforma RP: PostgreSQL.
+- Plataforma RP: MariaDB/MySQL via `mysql2/promise`.
 - Cache/fila: Redis opcional.
 
 ## 6. Portas

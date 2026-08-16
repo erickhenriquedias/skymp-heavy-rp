@@ -53,13 +53,15 @@ Deriva de [`PLATFORM_INFRASTRUCTURE_AUDIT.md`](../research/PLATFORM_INFRASTRUCTU
 | 3.6 | Modpack em partes, uma parte com `contentSig` igual | Parte pulada, `skipped` incrementa | unit | ❌ |
 | 3.7 | Jogo aberto durante a atualização | `gameRunning: true`, recusa antes de baixar | manual | ❌ |
 | 3.8 | Extração falha no meio | Carimbo **não** é escrito; próxima tentativa refaz | unit | ❌ |
-| 3.9 | Manifesto com `manifestVersion` maior que o conhecido | `ERROR: MANIFEST_TOO_NEW`, não ignora campos | unit | ➖ `PLAT-06` |
+| 3.9 | `/mods.json` com `manifestVersion` maior que o conhecido | `manifest_unsupported_version`, não ignora campos | unit | ✅ contrato compartilhado v1 |
 | 3.10 | Manifesto de `development` servido na URL de `stable` | Recusa por divergência de canal | unit | ➖ `PLAT-21` |
 | 3.11 | Jogador nunca abre Configurações | **Deveria** atualizar no fluxo de jogar. Hoje **não atualiza** | manual | ❌ `PLAT-01` |
 
 3.3 e 3.4 são os testes mais importantes desta seção e os mais baratos: o comportamento correto já está implementado e não tem nada que o proteja de uma regressão. São exatamente o caso em que um teste vale porque a lógica está certa **hoje**.
 
-3.9 e 3.10 estão `➖` porque testam campos que o formato ainda não tem.
+3.9 está coberto no loader. O campo `channel` agora existe e aceita somente
+valores conhecidos, mas 3.10 continua pendente porque ainda não há URLs/canais
+separados para comparar o canal recebido com o canal solicitado (`PLAT-21`).
 
 ---
 
@@ -80,8 +82,8 @@ Onde a cobertura atual é boa. `parity.test.mjs` já cobre o núcleo.
 | 4.9 | CC exigido pelo servidor e ausente no cliente | Reprovado | unit | ✅ |
 | 4.10 | Cabeçalho TES4 inválido / arquivo truncado | Erro nomeado, sem exceção | unit | ✅ |
 | 4.11 | **BSA extra** em `Data/`, fora do manifesto | Depende de `extraFilePolicy` | unit | ❌ `PLAT-11` |
-| 4.12 | BSA acima de 2 GB | Hasheia por stream, sem estourar memória | integração | ❌ `PLAT-10` |
-| 4.13 | `verify-mods` com N divergências | Relata **todas**, não a primeira | unit | ❌ `PLAT-05` |
+| 4.12 | BSA acima de 2 GB | Hasheia por stream, sem estourar memória | integração | ⚠️ stream unitário aprovado; arquivo real pendente |
+| 4.13 | `verify-mods` com N divergências | Relata **todas**, não a primeira | unit | ✅ `PLAT-05` |
 | 4.14 | `/mods.json` responde 503 | Launcher **não** aprova; mensagem específica | http | ⚠️ (503 testado no servidor; reação do launcher não) |
 | 4.15 | Manifesto vazio (`mods: []`, `loadOrder: []`) | Recusado na origem, nunca servido | unit | ❌ `PLAT-27` — é **servido com 200** |
 | 4.16 | Manifesto com `mods: []` e `loadOrder` preenchida | Conteúdo não verificado; ordem sim | unit | ⚠️ comportamento deliberado (`--only-load-order`) |
@@ -120,12 +122,13 @@ Tudo `➖`: o modo não existe (`PLAT-02`). A matriz fica escrita para quando ex
 | 6.5 | `path` com `..` | **Manifesto inteiro** recusado, não só a entrada | unit | ➖ `PLAT-07` |
 | 6.6 | `path` absoluto ou com drive (`C:`) | Idem | unit | ➖ |
 | 6.7 | `path` com nome reservado do Windows (`CON`, `NUL`, `COM1`) | Idem | unit | ➖ |
-| 6.8 | ZIP contendo `../../Windows/…` | Extração recusa | unit | ❌ `PLAT-07` |
+| 6.8 | ZIP contendo `../../Windows/…` | Extração recusa | unit | ✅ ZIP hostil real |
 | 6.9 | ZIP com symlink/junction apontando pra fora | Extração recusa | manual | ❌ |
-| 6.10 | `downloadUrl` para host fora da allowlist | Download recusado | unit | ❌ `PLAT-08` |
-| 6.11 | Redirecionamento para host não autorizado | Recusado | unit | ❌ `PLAT-08` |
-| 6.12 | Feed de manifesto servido por HTTP | Recusado | unit | ❌ `PLAT-08` (`httpGetJson` aceita hoje) |
+| 6.10 | `downloadUrl` para host fora da allowlist | Download recusado | unit | ✅ política compartilhada |
+| 6.11 | Redirecionamento para host não autorizado | Recusado | unit | ✅ política reaplicada por salto |
+| 6.12 | Feed de manifesto servido por HTTP | Recusado | unit | ✅ somente HTTPS |
 | 6.13 | `downloadUrl` com `manual-install` | Gerador **recusa produzir** o manifesto | unit | ➖ (política §3) |
+| 6.14 | Gerar manifesto em path privado do operador | JSON não contém `sourceDataDir` | unit | ✅ |
 
 6.8 é a linha mais importante da matriz inteira. É automatizável sem Skyrim e sem rede: monte um ZIP com uma entrada `../x`, chame `extractZip` num diretório temporário, e verifique que nada foi escrito fora dele. **O teste pode ser escrito antes da correção** — ele falha, e é essa falha que documenta o problema.
 
@@ -137,11 +140,11 @@ Tudo `➖`: o modo não existe (`PLAT-02`). A matriz fica escrita para quando ex
 |---|---|---|---|---|
 | 7.1 | `game-api` fora do ar, clique em JOGAR | `connection_failed` com texto útil | http | ⚠️ |
 | 7.2 | Painel fora do ar durante o login | Erro nomeado, não janela pendurada | manual | ❌ |
-| 7.3 | MySQL fora do ar | `/ready` responde **503**; `/health` continua 200 | http | ➖ `PLAT-18` |
+| 7.3 | MySQL fora do ar | `/ready` responde **503**; `/health` continua 200 | http | ⚠️ unit/HTTP; falta MariaDB real `PLAT-18` |
 | 7.4 | MySQL fora do ar, jogador tenta entrar | `internal_error` — e `/ready` explica por quê | integração | ⚠️ |
 | 7.5 | Timeout do feed de update | Falha em 20 s (já implementado), sem travar a UI | unit | ❌ |
-| 7.6 | Servidor em manutenção | `/status` devolve `maintenance` + mensagem; launcher mostra | http | ➖ `PLAT-20` |
-| 7.7 | Servidor cheio | `/status` devolve `full`; JOGAR vira "entrar na fila" | http | ➖ |
+| 7.6 | Servidor em manutenção | `/status` devolve `maintenance` + mensagem; launcher mostra e bloqueia JOGAR | unit/http | ⚠️ código aprovado; falta launcher empacotado `PLAT-20` |
+| 7.7 | Servidor cheio | `/status` devolve `full`; JOGAR vira "ENTRAR NA FILA" | unit/http | ⚠️ código aprovado; falta launcher empacotado |
 
 ---
 
@@ -165,11 +168,18 @@ Cobertura atual: `queue.test.js`, 13 testes em 6 suítes, todos em memória. Ver
 | 8.12 | Ticket após `release` | Deixa de resolver | unit | ✅ |
 | 8.13 | Conta que nunca entrou | `not_queued` | unit | ✅ |
 | 8.14 | **Dois launchers, mesmo `auth.json`** | Um entra; o outro recebe erro **explicável**, não `invalid_ticket` cru | integração | ❌ |
-| 8.15 | **Restart da `game-api` com jogadores dentro** | Ocupação **não** deve voltar a zero | integração | ❌ `PLAT-13` |
+| 8.15 | Recuperação de ocupação após restart | Conectados e reservas recentes voltam antes da porta abrir | unit | ✅ `PLAT-13` |
 | 8.16 | Corrida de capacidade | Não existe dentro da fila (síncrona, monothread) | — | ➖ |
-| 8.17 | Persistência de `launch_tickets` sob polling longo | Expurgo mantém a tabela limitada | integração | ❌ `PLAT-16` |
+| 8.17 | Retenção de `launch_tickets` e `game_sessions` | Cortes distintos, lotes limitados e execução não concorrente | unit | ✅ `PLAT-16` |
+| 8.18 | Rate limiter compartilhado recebe 10.000 chamadas bloqueadas da mesma chave | Bucket não ultrapassa o limite configurado | unit | ✅ `PLAT-17` |
+| 8.19 | Flood de IPs distintos contra game-api, painel e bot | Buckets e heap ficam limitados; excesso recebe 429 sem degradar tráfego legítimo | carga | ❌ operacional |
+| 8.20 | Backlog superior a 5.000 credenciais vencidas no MariaDB | Remove por rodadas, preserva válidas e usa índices de expiração | integração | ❌ operacional `PLAT-16` |
+| 8.21 | **Restart da game-api com dois clientes reais dentro** | Ocupação não volta a zero e ninguém novo excede a capacidade | integração | ❌ operacional `PLAT-13` |
 
-8.16 fica registrado como `➖` de propósito: a §13 do briefing pede o cenário, e a resposta honesta é que ele não existe onde se espera. A corrida real está em 8.15, através de um restart — não dentro da estrutura de dados.
+8.16 fica registrado como `➖` de propósito: a §13 do briefing pede o cenário,
+e a resposta honesta é que ele não existe dentro da estrutura síncrona. A
+fronteira memória/MariaDB do restart possui cobertura unitária em 8.15; sua
+prova com processos e clientes reais permanece em 8.21.
 
 8.14 vale ser desdobrado, porque o comportamento é o correto e a mensagem é o problema: o `launchTicket` é de uso único, então o segundo launcher perde a corrida por desenho. O que falta é o erro dizer isso ("outro launcher já está usando esta conta") em vez de `invalid_ticket`.
 
@@ -191,14 +201,18 @@ Cobertura atual: `queue.test.js`, 13 testes em 6 suítes, todos em memória. Ver
 | 9.10 | Conta sem whitelist aprovada | `not_whitelisted` | integração | ❌ |
 | 9.11 | Conta sem personagem aprovado | `no_approved_character` | integração | ❌ |
 | 9.12 | Sessão resolvida no master | `{ user: { id } }`, `resolve_count` incrementa | integração | ⚠️ (`apps/web/server.test.js` verifica o SQL) |
-| 9.13 | Sessão revogada | Master recusa | integração | ⚠️ (SQL verificado; **nada escreve `revoked_at`** — `PLAT-14`) |
+| 9.13 | Sessão revogada | Master recusa | integração | ⚠️ (SQL e lease verificados em unit; falta MariaDB real — `PLAT-14`) |
 | 9.14 | Sessão expirada (>12 h) | Master recusa | integração | ❌ |
-| 9.15 | **Mesma sessão resolvida de dois IPs** | Deveria ser detectável | integração | ❌ `PLAT-15` |
-| 9.16 | `release` revoga a sessão da conta | `revoked_at` preenchido | integração | ❌ `PLAT-14` |
+| 9.15 | **Mesma sessão resolvida de dois IPs** | Exatamente um consumo vence; o outro recebe 404 | integração | ⚠️ corrida SQL verificada; falta MariaDB real `PLAT-15` |
+| 9.16 | `release` revoga a conexão exata | `revoked_at`/`disconnected_at` só na linha do lease; replay é no-op | integração | ⚠️ unit; falta MariaDB real `PLAT-14` |
+| 9.17 | Master confirma ocupação na game-api | Reserva vira conexão e não expira em 3 min | http/unit | ✅ `PLAT-13` |
+| 9.18 | Game-api indisponível durante resolução master | Login recebe 503; mesmo token fica consumido e sessão nova converge | integração | ❌ operacional `PLAT-13/15` |
+| 9.19 | Disconnect antigo após reconnect | Lease antigo não revoga nem libera a conexão nova | integração | ⚠️ unit; falta dois clientes reais `PLAT-14` |
+| 9.20 | Dois clientes na mesma conta | Novo lease expulsa o Actor anterior; cleanup antigo não derruba o novo | integração | ⚠️ unit; falta dois clientes reais `PLAT-14/15` |
 
 9.8 é o teste que prova a propriedade central de segurança deste sistema — uso único sob concorrência — e é o único da seção que **não pode** ser substituído por leitura de código. Duas conexões, mesmo ticket, contar quantos passam. Exige banco.
 
-O bloco 9.5–9.11 é uma dívida única: **não há harness de integração com MySQL neste repositório.** Enquanto não houver, toda a coluna fica `❌`, e nenhum trabalho por linha resolve. Montá-lo (contêiner efêmero de MariaDB, migrations aplicadas, dados semeados) destrava 12 linhas desta matriz de uma vez, e é o item de maior alavancagem daqui.
+O bloco 9.5–9.11 é uma dívida única: **não há harness de integração com MariaDB neste repositório.** Enquanto não houver, toda a coluna fica `❌`, e nenhum trabalho por linha resolve. Montá-lo (instância efêmera de MariaDB, migrations aplicadas, dados semeados) destrava 12 linhas desta matriz de uma vez, e é o item de maior alavancagem daqui.
 
 ---
 
@@ -228,7 +242,7 @@ Ordenado por (valor × facilidade), não por severidade:
 | 3 | Extrair `validateGamePath` para módulo puro | 2.3, 2.4, 2.6 | Baixo — o padrão do `parity.mjs` já existe |
 | 4 | Testes de manifesto sem `sha256` (3.3, 3.4) | Protege comportamento **já correto** de regressão | Baixo |
 | 5 | Harness de integração com MySQL | 12 linhas da §9 de uma vez | Médio, e é o maior salto |
-| 6 | `/ready` + teste (7.3) | Diagnóstico de `PLAT-18` | Baixo |
+| 6 | `/ready` + teste (7.3) | ✅ implementado; falta apenas MariaDB real | Concluído no código |
 
 Os cinco primeiros não exigem decisão de produto nenhuma e não dependem da Fase 0. O sexto é a menor unidade útil de trabalho de operação.
 

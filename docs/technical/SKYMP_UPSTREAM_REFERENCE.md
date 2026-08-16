@@ -141,7 +141,7 @@ Nós já temos tudo que esse endpoint precisa: OAuth do Discord, whitelist, e a 
 1. `apps/web` implementa `GET /api/servers/:masterKey/sessions/:session`, resolvendo o ticket para `{ user: { id: accountId, discordId } }`.
 2. `server-settings.json` aponta `master` para o nosso painel e define `masterKey`.
 3. `offlineMode: false`.
-4. O launcher já grava `config.session` — passa a gravar o ticket que o painel emitiu.
+4. O launcher grava o ticket como `skymp5-client-settings.txt.gameData.session`; o patch `launcher-session-settings-auth` o converte em `AuthGameData.remote`.
 
 Feito isso, `whitelist.js` para de confiar no `profileId` do cliente sem precisar de nenhuma mudança nele: o `profileId` que chega **já é** o `accountId` validado.
 
@@ -155,7 +155,7 @@ O `login.ts` chama, se existir:
 mp.onLoginAttempt = (profileId) => boolean;  // false recusa a conexão
 ```
 
-É o ponto correto para whitelist e ban — o cliente recebe `loginFailedBanned`. Hoje fazemos isso por polling de conexão + `mp.kick` depois do fato.
+É o ponto correto para whitelist e ban — o cliente recebe `loginFailedBanned`. Hoje reagimos ao evento nativo de conexão e ainda usamos `mp.kick` depois do spawn.
 
 ### `discordAuth` nativo no servidor
 
@@ -284,7 +284,7 @@ Enquanto nenhuma das duas for feita, o `/iniciar` + `checkDamageSpike` continua 
 | 4 | Abrir `localhost:9000` na próxima sessão de teste da UI | Zero | Para de depurar UI às cegas |
 | 5 | **Trocar o polling do `death-service` por `mp.onDeath`** | Horas | Morte no frame + `killerId` de graça. Substitui polling **e** a heurística de proximidade do anti-RDM |
 | 6 | **`apps/web` vira o master API de sessão** (ver 2.6) | Um dia | Resolve o item 1.6 usando o mecanismo nativo, em vez do nosso `/internal/session/resolve` paralelo |
-| 7 | `mp.onLoginAttempt` no lugar do polling de conexão + kick | Horas | Recusa no handshake, com mensagem correta pro cliente |
+| 7 | `mp.onLoginAttempt` no lugar de whitelist pós-conexão + kick | Horas | Recusa no handshake, com mensagem correta pro cliente |
 | 8 | Avaliar o `discordAuth` nativo antes de investir mais no bot | Horas | Ban por cargo, log de login e IP oculto sem código nosso |
 | 9 | Subir o WebPack dev server na 1234 pro fluxo de UI | Um dia | Live reload da UI |
 

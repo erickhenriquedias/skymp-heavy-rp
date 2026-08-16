@@ -95,7 +95,7 @@ async function checkWhitelist(userId, profileId, actorId) {
     }
 
     let accountRows = await db.query(
-      `SELECT a.id, a.status, a.vip_level 
+      `SELECT a.id, a.status, a.vip_level
        FROM accounts a
        WHERE a.id = ?`,
       [accountId]
@@ -129,7 +129,19 @@ async function checkWhitelist(userId, profileId, actorId) {
 
     // 3. Verificar aprovação de Whitelist
     let wlRows = await db.query(
-      `SELECT status FROM whitelist_applications WHERE account_id = ? AND status = 'approved'`,
+      `SELECT w.status
+         FROM whitelist_applications w
+        WHERE w.account_id = ?
+          AND w.status = 'approved'
+          AND (
+            COALESCE(w.approval_source, 'staff') <> 'discord_role'
+            OR EXISTS (
+              SELECT 1 FROM discord_role_access dra
+               WHERE dra.account_id = w.account_id
+                 AND dra.eligible = 1
+                 AND dra.expires_at > NOW()
+            )
+          )`,
       [account.id]
     );
 
@@ -137,7 +149,8 @@ async function checkWhitelist(userId, profileId, actorId) {
       if (allowLocalAutoWhitelist(profileId)) {
         console.log(`[whitelist] Auto-approving whitelist application for profileId ${profileId}...`);
         await db.query(
-          `INSERT INTO whitelist_applications (account_id, status, reviewer_notes) VALUES (?, 'approved', 'Auto-approved for local test')`,
+          `INSERT INTO whitelist_applications (account_id, status, approval_source, reviewer_notes)
+           VALUES (?, 'approved', 'local', 'Auto-approved for local test')`,
           [account.id]
         );
       } else {
@@ -164,7 +177,7 @@ async function checkWhitelist(userId, profileId, actorId) {
         const lastName = profileId === 2 ? 'Balgruuf' : 'Battleborn';
         console.log(`[whitelist] Auto-creating approved character: ${firstName} ${lastName}...`);
         const insertChar = await db.query(
-          `INSERT INTO characters (account_id, first_name, last_name, status, pos_x, pos_y, pos_z, angle_z, cell_id) 
+          `INSERT INTO characters (account_id, first_name, last_name, status, pos_x, pos_y, pos_z, angle_z, cell_id)
            VALUES (?, ?, ?, 'approved', 35, -165, -189, 180, '0x162e2')`,
           [account.id, firstName, lastName]
         );
@@ -188,13 +201,13 @@ async function checkWhitelist(userId, profileId, actorId) {
     }
 
     console.log(`[whitelist] Whitelist check passed! Welcome, ${character.first_name} ${character.last_name}`);
-    
+
     // Registrar na memória cache de comandos
     commands.registerActiveCharacter(actorId, character, account.id, profileId);
 
     // Registrar cargo de staff (carregado de staff_roles, não de vip_level)
     await adminService.registerStaffRole(actorId, account.id);
-    
+
     // Inicializar máquina de estados (carrega IMPRISONED/RESTRAINED do banco)
     await characterState.initialize(character.id);
 
@@ -204,23 +217,24 @@ async function checkWhitelist(userId, profileId, actorId) {
     // 5. Atualizar posição do jogador in-game a partir do banco de dados
     if (typeof mp !== 'undefined' && actorId) {
       console.log(`[whitelist] Moving actor ${actorId.toString(16)} to db location: pos=[${character.pos_x}, ${character.pos_y}, ${character.pos_z}] cell=${character.cell_id}`);
-      
+
       const locData = {
         pos: [character.pos_x, character.pos_y, character.pos_z],
         rot: [0, 0, character.angle_z],
         cellOrWorldDesc: character.cell_id
       };
-      
+
       try {
         mp.set(actorId, 'locationalData', locData);
         mp.set(actorId, 'browserVisible', true);
         console.log(`[whitelist] Spawn locData applied successfully for ${character.first_name} ${character.last_name}`);
-        
+
         // Sincroniza o Inventário do Banco de Dados para o Cliente (com reconciliação)
         await inventoryService.syncInventoryToClient(actorId, character.id);
-        
+
       } catch (err) {
         console.error(`[whitelist] Failed to apply locationalData:`, err.message);
+        throw err;
       }
     }
 

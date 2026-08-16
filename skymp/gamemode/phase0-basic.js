@@ -56,7 +56,9 @@ const admin          = require(path.join(gamemodeDir, 'admin-service'));
 const { installUiEventGateway } = require(path.join(gamemodeDir, 'core', 'ui-event-gateway'));
 const { createUiEventRateLimiter } = require(path.join(gamemodeDir, 'core', 'ui-event-rate-limiter'));
 const { createConnectionMonitor } = require(path.join(gamemodeDir, 'core', 'connection-monitor'));
+const { createGameApiSessionClient } = require(path.join(gamemodeDir, 'core', 'game-api-session-client'));
 const serverOptions  = require(path.join(gamemodeDir, 'core', 'server-options'));
+const { validateServerConfig } = require(path.join(gamemodeDir, 'scripts', 'check-server-config'));
 const governance    = require(path.join(gamemodeDir, 'governance-service'));
 const marketStalls  = require(path.join(gamemodeDir, 'market-stalls-service'));
 const playerPanel   = require(path.join(gamemodeDir, 'player-panel-service'));
@@ -441,31 +443,59 @@ moduleRegistry.register({
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function boot() {
-  try {
-    // Antes do banco: um valor de gameplay inválido aborta aqui, e é melhor
-    // descobrir isso com o servidor ainda vazio.
-    const options = serverOptions.load();
-    console.log(`[phase0] server-options: ${options.usedFile ? options.path : 'nenhum arquivo, usando defaults'}`);
-    for (const warning of options.warnings) {
-      console.warn(`[phase0] server-options: ${warning}`);
-    }
-
-    db.init();
-    console.log("[phase0] Database pool initialized");
-
-    // Inicializar módulos via registry (verifica env vars, resolve deps, registra comandos)
-    await moduleRegistry.bootAll();
-
-  } catch (err) {
-    console.error("[phase0] Fatal: Could not initialize database or services:", err.message);
+  // Antes do banco: um valor de gameplay inválido aborta aqui, e é melhor
+  // descobrir isso com o servidor ainda vazio.
+  const options = serverOptions.load();
+  console.log(`[phase0] server-options: ${options.usedFile ? options.path : 'nenhum arquivo, usando defaults'}`);
+  for (const warning of options.warnings) {
+    console.warn(`[phase0] server-options: ${warning}`);
   }
-}
 
-boot();
+  if (typeof mp !== 'undefined') {
+    const findings = validateServerConfig(mp.getServerSettings(), {
+      environment: process.env.NODE_ENV || 'production'
+    });
+    for (const finding of findings.filter(item => item.level === 'WARN')) {
+      console.warn(`[phase0] server-settings ${finding.code}: ${finding.message}`);
+    }
+    const authErrors = findings.filter(item => item.level === 'ERROR');
+    if (authErrors.length > 0) {
+      throw new Error(
+        'server-settings reprovado: ' +
+        authErrors.map(item => `${item.code} (${item.message})`).join('; ')
+      );
+    }
+    console.log('[phase0] Server/auth configuration approved');
+  }
+
+  db.init();
+  await db.ping();
+  console.log("[phase0] Database connection verified");
+
+  const migrationResult = await db.migrate();
+  console.log(
+    `[phase0] Database migrations approved (v${migrationResult.currentVersion}; ` +
+    `${migrationResult.applied.length} aplicada(s) neste boot)`
+  );
+
+  // Inicializar módulos via registry (verifica env vars, resolve deps, registra comandos)
+  await moduleRegistry.bootAll();
+  moduleRegistry.assertCoreReady();
+  console.log('[phase0] Core readiness approved');
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Runtime SkyMP
 // ─────────────────────────────────────────────────────────────────────────────
+
+let connectionMonitor = null;
+let uiEventMetricsTimer = null;
+let runtimeStarted = false;
+let shuttingDown = false;
+
+function startRuntime() {
+  if (runtimeStarted) return;
+  runtimeStarted = true;
 
 if (typeof mp !== "undefined") {
   console.log("[phase0] mp API available");
@@ -542,7 +572,7 @@ if (typeof mp !== "undefined") {
   });
   // Telemetria sem payload: fornece a base real para escolher um limite sem
   // registrar texto do jogador nem bloquear a UI antes da medicao.
-  const uiEventMetricsTimer = setInterval(() => {
+  uiEventMetricsTimer = setInterval(() => {
     const metrics = uiEventRateLimiter.snapshot();
     if (metrics.observed > 0 || metrics.rejected > 0) {
       console.log('[phase0] UI event metrics:', JSON.stringify(metrics));
@@ -553,9 +583,64 @@ if (typeof mp !== "undefined") {
   console.log("[phase0] mp API not available");
 }
 
-// Polling de conexão (a API SkyMP ainda não expõe callback de login). O monitor
-// protege contra respostas de whitelist de sessões antigas e espera o ator e o
-// profile aparecerem em vez de abandonar uma conexão publicada cedo pela engine.
+// Ciclo orientado pelos eventos nativos connect/disconnect. O monitor protege
+// contra respostas antigas da whitelist e aplica retry somente enquanto o ator
+// ou profile da conexão ainda não foi publicado pela engine.
 if (typeof mp !== 'undefined') {
-  createConnectionMonitor({ mp, whitelist, commands, playerPanel }).start();
+  const serverSettings = mp.getServerSettings();
+  const requireSessionLease = serverSettings.offlineMode !== true;
+  let sessionLeaseClient;
+  if (requireSessionLease) {
+    sessionLeaseClient = createGameApiSessionClient({
+      baseUrl: process.env.GAME_API_INTERNAL_URL || 'http://127.0.0.1:7758',
+      internalSecret: process.env.INTERNAL_API_SECRET || ''
+    });
+  } else {
+    console.warn('[phase0] Modo local offline: lease de conexão desativado; proibido em produção.');
+  }
+  connectionMonitor = createConnectionMonitor({
+    mp,
+    whitelist,
+    commands,
+    playerPanel,
+    sessionLeaseClient,
+    requireSessionLease
+  });
+  connectionMonitor.start();
 }
+}
+
+async function shutdown(reason) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[phase0] Shutdown iniciado (${reason}).`);
+
+  if (connectionMonitor) connectionMonitor.stop();
+  if (uiEventMetricsTimer) clearInterval(uiEventMetricsTimer);
+  await moduleRegistry.shutdownAll();
+  await db.close();
+  console.log('[phase0] Shutdown concluído.');
+}
+
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.once(signal, () => {
+    shutdown(signal)
+      .then(() => process.exit(0))
+      .catch(err => {
+        console.error('[phase0] Falha durante shutdown:', err.message);
+        process.exit(1);
+      });
+  });
+}
+
+boot()
+  .then(startRuntime)
+  .catch(async err => {
+    console.error('[phase0] Fatal: Could not initialize database or core services:', err.message);
+    try {
+      await shutdown('boot failure');
+    } catch (shutdownError) {
+      console.error('[phase0] Falha ao limpar boot parcial:', shutdownError.message);
+    }
+    process.exit(1);
+  });

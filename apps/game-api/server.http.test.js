@@ -16,12 +16,37 @@
  */
 
 process.env.INTERNAL_API_SECRET = process.env.INTERNAL_API_SECRET || 'test-secret-not-used-here';
+process.env.MODS_MANIFEST_PATH = require('node:path').join(
+  require('node:os').tmpdir(),
+  `skyrp-missing-mods-${process.pid}.json`
+);
 
 const { test, describe, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
 
-const { app } = require('./server');
+const {
+  app,
+  queue,
+  setSessionLeaseServiceForTests,
+  setReadinessProbeForTests,
+  setMaintenanceForTests
+} = require('./server');
+
+setSessionLeaseServiceForTests({
+  confirmConnected: async (accountId, sessionId) => ({
+    ok: queue.confirmSessionConnected(accountId, sessionId),
+    reason: 'admission_not_found'
+  }),
+  claim: async accountId => {
+    const admission = queue.getAdmission(accountId);
+    if (!admission?.connected) return { ok: false, reason: 'connected_admission_not_found' };
+    return { ok: true, leaseToken: 'lease'.padEnd(64, 'a') };
+  },
+  release: async leaseToken => typeof leaseToken === 'string' && leaseToken.length >= 32
+    ? { ok: true, released: false, stale: true }
+    : { ok: false, released: false, reason: 'invalid_lease' }
+});
 
 let server;
 let baseUrl;
@@ -39,7 +64,7 @@ after(async () => {
   if (server) await new Promise((resolve) => server.close(resolve));
 });
 
-function request(method, path, { body } = {}) {
+function request(method, path, { body, headers = {} } = {}) {
   return new Promise((resolve, reject) => {
     const payload = body === undefined ? null : JSON.stringify(body);
     const req = http.request(
@@ -47,8 +72,8 @@ function request(method, path, { body } = {}) {
       {
         method,
         headers: payload
-          ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }
-          : {}
+          ? { ...headers, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }
+          : headers
       },
       (res) => {
         let data = '';
@@ -143,15 +168,214 @@ describe('endpoints internos exigem segredo', () => {
     const res = await request('POST', '/internal/session/release', { body: { session: 'x' } });
     assert.equal(res.status, 401);
   });
+
+  test('session/connected sem X-Internal-Secret responde 401', async () => {
+    const res = await request('POST', '/internal/session/connected', { body: { accountId: 42 } });
+    assert.equal(res.status, 401);
+  });
+
+  test('session/claim sem X-Internal-Secret responde 401', async () => {
+    const res = await request('POST', '/internal/session/claim', { body: { accountId: 42 } });
+    assert.equal(res.status, 401);
+  });
 });
 
-describe('/health responde sem banco', () => {
-  test('devolve o estado do manifesto e da fila', async () => {
+describe('confirmação interna da ocupação', () => {
+  const headers = { 'X-Internal-Secret': 'test-secret-not-used-here' };
+
+  test('recusa conta que não possui admissão', async () => {
+    const res = await request('POST', '/internal/session/connected', {
+      headers,
+      body: { accountId: 999999, sessionId: 999999 }
+    });
+    assert.equal(res.status, 409);
+    assert.equal(res.body.error, 'admission_not_found');
+  });
+
+  test('marca admissão existente como conectada', async () => {
+    const ticket = queue.join(4242, 'discord-4242', () => 'session-ticket-4242').ticket;
+    assert.equal(queue.bindSession(4242, ticket, 42420), true);
+    const res = await request('POST', '/internal/session/connected', {
+      headers,
+      body: { accountId: 4242, sessionId: 42420 }
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body, { ok: true, marked: true });
+    assert.equal(queue.snapshot().connected, 1);
+    queue.release(4242);
+  });
+
+  test('recusa sessionId ausente antes do serviço', async () => {
+    const res = await request('POST', '/internal/session/connected', {
+      headers,
+      body: { accountId: 7 }
+    });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_session_id');
+  });
+
+  test('claim exige uma admissão conectada', async () => {
+    const res = await request('POST', '/internal/session/claim', {
+      headers,
+      body: { accountId: 999998 }
+    });
+    assert.equal(res.status, 409);
+    assert.equal(res.body.error, 'connected_admission_not_found');
+  });
+
+  test('release recusa lease inválido e aceita disconnect antigo idempotente', async () => {
+    const invalid = await request('POST', '/internal/session/release', {
+      headers,
+      body: { leaseToken: 'curto' }
+    });
+    assert.equal(invalid.status, 400);
+    assert.equal(invalid.body.reason, 'invalid_lease');
+
+    const stale = await request('POST', '/internal/session/release', {
+      headers,
+      body: { leaseToken: 'old'.padEnd(64, 'x') }
+    });
+    assert.equal(stale.status, 200);
+    assert.deepEqual(stale.body, { ok: true, released: false, stale: true });
+  });
+});
+
+describe('liveness e readiness separados', () => {
+  test('/health confirma somente o processo e não expõe fila ou manifesto', async () => {
     const res = await request('GET', '/health');
 
     assert.equal(res.status, 200);
-    assert.ok(Object.prototype.hasOwnProperty.call(res.body, 'ok'));
-    assert.ok(res.body.queue, 'health precisa expor o estado da fila');
+    assert.deepEqual(res.body, { ok: true });
+    assert.equal(res.body.queue, undefined);
+    assert.equal(res.body.manifest, undefined);
+  });
+
+  test('/ready responde 200 somente quando todas as dependências estão prontas', async () => {
+    setReadinessProbeForTests(async () => ({
+      ready: true,
+      checks: { database: 'ok', manifest: 'ok', maintenance: 'inactive' }
+    }));
+    try {
+      const res = await request('GET', '/ready');
+      assert.equal(res.status, 200);
+      assert.deepEqual(res.body, {
+        ready: true,
+        checks: { database: 'ok', manifest: 'ok', maintenance: 'inactive' }
+      });
+    } finally {
+      setReadinessProbeForTests(null);
+    }
+  });
+
+  test('/ready responde 503 quando MariaDB não está disponível', async () => {
+    setReadinessProbeForTests(async () => ({
+      ready: false,
+      checks: { database: 'unavailable', manifest: 'ok', maintenance: 'inactive' }
+    }));
+    try {
+      const res = await request('GET', '/ready');
+      assert.equal(res.status, 503);
+      assert.equal(res.body.ready, false);
+      assert.equal(res.body.checks.database, 'unavailable');
+    } finally {
+      setReadinessProbeForTests(null);
+    }
+  });
+
+  test('exceção do probe falha fechado sem vazar mensagem interna', async () => {
+    setReadinessProbeForTests(async () => { throw new Error('senha do banco apareceu aqui'); });
+    try {
+      const res = await request('GET', '/ready');
+      assert.equal(res.status, 503);
+      assert.equal(res.raw.includes('senha do banco'), false);
+    } finally {
+      setReadinessProbeForTests(null);
+    }
+  });
+});
+
+describe('modo de manutenção', () => {
+  test('join e status retornam maintenance antes de consumir qualquer ticket', async () => {
+    setMaintenanceForTests(true, 'Retornamos às 20h.');
+    try {
+      const join = await request('POST', '/api/queue/join', { body: {} });
+      const status = await request('POST', '/api/queue/status', { body: {} });
+      assert.equal(join.status, 503);
+      assert.deepEqual(join.body, { status: 'maintenance', message: 'Retornamos às 20h.' });
+      assert.deepEqual(status.body, join.body);
+    } finally {
+      setMaintenanceForTests(false);
+    }
+  });
+
+  test('/status anuncia manutenção sem depender de banco ou manifesto', async () => {
+    setMaintenanceForTests(true, 'Atualização do modpack.');
+    setReadinessProbeForTests(async () => { throw new Error('não deveria ser chamado'); });
+    try {
+      const res = await request('GET', '/status');
+      assert.equal(res.status, 200);
+      assert.equal(res.body.state, 'maintenance');
+      assert.equal(res.body.message, 'Atualização do modpack.');
+      assert.equal(Number.isInteger(res.body.players), true);
+    } finally {
+      setReadinessProbeForTests(null);
+      setMaintenanceForTests(false);
+    }
+  });
+});
+
+describe('status público', () => {
+  test('expõe somente contagens agregadas quando online', async () => {
+    setReadinessProbeForTests(async () => ({ ready: true }));
+    try {
+      const res = await request('GET', '/status');
+      assert.equal(res.status, 200);
+      assert.ok(['online', 'full'].includes(res.body.state));
+      assert.equal(Number.isInteger(res.body.players), true);
+      assert.equal(Number.isInteger(res.body.capacity), true);
+      assert.equal(Number.isInteger(res.body.queue), true);
+      assert.equal(JSON.stringify(res.body).includes('discord'), false);
+      assert.equal(JSON.stringify(res.body).includes('ticket'), false);
+    } finally {
+      setReadinessProbeForTests(null);
+    }
+  });
+
+  test('dependência indisponível vira starting, sem detalhes internos', async () => {
+    setReadinessProbeForTests(async () => ({ ready: false }));
+    try {
+      const res = await request('GET', '/status');
+      assert.equal(res.body.state, 'starting');
+      assert.equal(Object.hasOwn(res.body, 'checks'), false);
+    } finally {
+      setReadinessProbeForTests(null);
+    }
+  });
+
+  test('consultas concorrentes compartilham um único probe de readiness', async () => {
+    let probes = 0;
+    setReadinessProbeForTests(async () => {
+      probes += 1;
+      await new Promise(resolve => setTimeout(resolve, 5));
+      return { ready: true };
+    });
+    try {
+      const responses = await Promise.all(Array.from({ length: 10 }, () => request('GET', '/status')));
+      assert.equal(responses.every(response => response.status === 200), true);
+      assert.equal(probes, 1);
+    } finally {
+      setReadinessProbeForTests(null);
+    }
+  });
+});
+
+describe('manifesto indisponível falha fechado no transporte HTTP', () => {
+  test('GET /mods.json responde 503, nunca 200 com listas vazias', async () => {
+    const res = await request('GET', '/mods.json');
+    assert.equal(res.status, 503);
+    assert.equal(res.body.error, 'Manifesto de mods indisponivel no servidor.');
+    assert.equal(res.body.mods, undefined);
+    assert.equal(res.body.loadOrder, undefined);
   });
 });
 

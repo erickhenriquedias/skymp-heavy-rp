@@ -66,20 +66,30 @@ test('auth boundary — sessão inválida não possui fallback para identidade d
   assert.doesNotMatch(route, /req\.(body|query).*profileId/);
 });
 
-test('auth boundary — launcher online injeta sessão opaca e remove profileId da config principal', () => {
-  const launcher = read('apps/launcher/electron/main.ts');
+test('auth boundary — falha de login upstream não grava a sessão em texto puro', () => {
+  const login = read('../skymp/skymp5-server/ts/systems/login.ts');
 
-  assert.match(launcher, /config\.session\s*=\s*`ticket:\$\{ticket \|\| ''\}`/);
-  assert.match(launcher, /delete config\.profileId/);
+  assert.doesNotMatch(login, /JSON\.stringify\(gameData\)/);
+  assert.match(login, /hasSession:\s*typeof gameData\?\.session === "string"/);
 });
 
-test('auth boundary — documenta o profileId legado ainda escrito no client settings', () => {
-  // Caracterização deliberada do blocker AUTH-01. Este teste deve ser invertido
-  // em AUTH-003 quando o fluxo online deixar de escrever a identidade legada.
+test('auth boundary — launcher online escreve gameData.session e remove credenciais legadas', () => {
+  const launcher = read('apps/launcher/electron/main.ts');
+  const authSettings = read('apps/launcher/electron/auth-settings.mjs');
+
+  assert.match(launcher, /buildSkyMpClientSettings/);
+  assert.match(authSettings, /settings\.gameData\s*=\s*\{ \.\.\.currentGameData, session \}/);
+  assert.match(authSettings, /delete settings\.gameData\.profileId/);
+  assert.match(authSettings, /delete settings\.gameData\.launcherTicket/);
+  assert.match(authSettings, /delete settings\.gameData\.token/);
+});
+
+test('auth boundary — launcher não deriva identidade SkyMP do Discord', () => {
   const launcher = read('apps/launcher/electron/main.ts');
 
-  assert.match(launcher, /clientSettings\.gameData\.profileId\s*=/);
-  assert.match(launcher, /clientSettings\.gameData\.launcherTicket\s*=/);
+  assert.doesNotMatch(launcher, /discordId\.slice/);
+  assert.doesNotMatch(launcher, /gameData\.profileId\s*=/);
+  assert.doesNotMatch(launcher, /gameData\.launcherTicket\s*=/);
 });
 
 test('auth boundary — consumo do launch ticket é um UPDATE condicional atômico', () => {

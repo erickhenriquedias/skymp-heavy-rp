@@ -30,7 +30,7 @@ export function compareMods(params: {
   serverMods: ServerMod[] | null | undefined;
   localFiles: string[];
   hashOf: (filename: string) => string;
-}): { success: boolean; error?: string };
+}): { success: boolean; error?: string; problems: string[] };
 
 export function analyzePlugins(params: {
   localPlugins: string[];

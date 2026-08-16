@@ -6,8 +6,9 @@
  *
  * Por que isto existe
  * ───────────────────
- * As migrations `v2`–`v10` são aplicadas **à mão**, em ordem, e nada verifica
- * que foram todas aplicadas. Um banco meio-migrado é a falha mais cara de
+ * O boot e `setup-db.js` aplicam as migrations automaticamente, em ordem, sob
+ * lock e com checksum. Este check continua sendo a verificacao independente do
+ * resultado real no information_schema. Um banco meio-migrado é a falha mais cara de
  * diagnosticar que existe neste projeto, porque tudo *quase* funciona: o
  * servidor sobe, o login passa, e só a query que toca a coluna faltante
  * quebra — às vezes semanas depois, numa cena, com ouro no meio.
@@ -325,9 +326,9 @@ function imprimirResultado(resultado, strict) {
   }
 
   console.error(
-    '\nAplique as migrations pendentes de skymp/packages/database, em ordem (v2 -> v10).\n' +
-    'Se voce acha que ja aplicou todas, aplicou parcialmente: as migrations sao\n' +
-    'idempotentes (IF NOT EXISTS), entao rodar de novo e seguro.'
+    '\nExecute `npm run db:setup`; o runner aplica schema e migrations em ordem.\n' +
+    'Se o runner falhar, nao force o boot: corrija a migration indicada e rode\n' +
+    'novamente. O ledger retoma da primeira versao ainda nao concluida.'
   );
   return false;
 }
