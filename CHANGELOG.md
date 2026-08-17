@@ -11,6 +11,31 @@ Versionamento [SemVer](https://semver.org/lang/pt-BR/).
 
 ### Adicionado
 
+- **Supervisor operacional OPS-001 (16/08/2026).** `Start-AllServices.ps1`
+  passou a falhar antes do primeiro spawn quando configuração, MariaDB, schema,
+  manifesto ou portas reprovam. O supervisor mantém uma instância por serviço,
+  separa liveness/readiness, usa backoff com jitter, abre circuito em crash loop
+  e coordena shutdown. Painel e bot ganharam `/health`/`/ready`; falha de login
+  do Discord não deixa mais uma API aparentemente saudável. Quatorze testes cobrem
+  a política isolada; o ensaio completo no Windows permanece operacional.
+
+- **Atualização transacional do launcher (16/08/2026).** Cliente e modpack são
+  extraídos em staging no mesmo volume, publicados sob journal, protegidos por
+  lock interprocesso e acompanhados de backup N-1. Interrupção é recuperada no
+  próximo início; o launcher ganhou **Desfazer Update**; remoção de obsoletos é
+  limitada aos arquivos previamente gerenciados. Os testes puros passaram, mas
+  falha de energia, disco cheio e fluxo empacotado continuam pendentes no
+  README central.
+
+- **Lifecycle de hot reload do gamemode (16/08/2026).** O entrypoint temporário
+  agora usa um singleton persistente para serializar shutdown da instância
+  anterior e boot da próxima. O registry só aceita ser reconstruído sem módulos
+  ativos; `SIGINT`/`SIGTERM` não se multiplicam; falha no meio do `initialize`
+  chama cleanup; hooks de morte/hit/UI e assinatura do trade são removidos.
+  Um pretest repete dez reloads com uma única instância ativa. A validação no
+  addon real permanece aberta e hot reload segue proibido em produção. Ver
+  [`HOT_RELOAD_LIFECYCLE.md`](docs/technical/HOT_RELOAD_LIFECYCLE.md).
+
 - **Auditoria do VOIP e validação do SkyVoice/LiveKit (14/08/2026) — a versão da CEF estava errada há meses, e o número errado é que sustentava a arquitetura.** Documento novo: [`SKYVOICE_LIVEKIT_AUDIT.md`](docs/technical/SKYVOICE_LIVEKIT_AUDIT.md), com as conclusões marcadas uma a uma como VERIFICADO, INFERIDO, PLANEJADO ou NÃO TESTADO. Módulos novos em [`core/voice/`](skymp/gamemode/core/voice/) e um spike executável em [`spikes/skyvoice-livekit/`](spikes/skyvoice-livekit/). O caminho legado não teve uma linha de comportamento alterada.
 
   **O achado: o SkyMP usa CEF 108, não "Chromium ~70".** `VOICE_CLIENT_PATCH.md`, `VOICE_NATIVE_HELPER.md` §1 e o cabeçalho do `voip-service.js` diziam "CEF3, baseado em Chromium ~70". O pin do upstream é `cef_binary_108.4.13+ga98cd4c+chromium-108.0.5359.125` (`overlay_ports/cef-prebuilt/portfile.cmake`), e o fork `hijosdelasnieves` pina a mesma. O número veio colado junto com o diff copiado de `Silveira-Software/skymp` e **nunca foi conferido contra o pin** — é a mesma classe de defeito que a pesquisa de ecossistema corrigiu em `4a57a65`: um fato de terceiro adotado como próprio.

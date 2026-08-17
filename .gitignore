@@ -47,3 +47,7 @@ skymp/config/secrets.*
 *.zip
 *.7z
 *.rar
+
+# Chave privada Ed25519 gerada pelo tooling de release. A chave publica pode
+# ser versionada/documentada; o PKCS8 privado nunca entra no repositorio.
+*.update-signing.pk8.base64

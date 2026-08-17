@@ -26,14 +26,20 @@ Escopo declarado: o caminho **login → whitelist → launcher → update → mo
 >
 > **Atualização de 16/08/2026 — `PLAT-10` corrigido no código:** a paridade
 > deixou de usar `readFileSync` para BSAs. Os arquivos exigidos pelo manifesto
-> são hasheados por stream, um por vez, mantendo MD5 apenas por compatibilidade
-> com o formato atual. O teste com BSA real acima de 2 GB continua operacional.
+> são hasheados por stream, um por vez, com SHA-256 no manifesto v2. O teste
+> com BSA real acima de 2 GB continua operacional.
 >
 > **Atualização de 16/08/2026 — `PLAT-06` corrigido no código:** o contrato
-> compartilhado exige `manifestVersion: 1`, canal conhecido e identificador de
-> build. Gerador, game-api e launcher recusam manifesto legado, versão futura,
-> canal desconhecido ou build vazio. Vincular cada URL a um canal específico
-> continua sendo o escopo separado de `PLAT-21`.
+> compartilhado exige `manifestVersion: 2`, canal conhecido, identificador de
+> build, paths canônicos e SHA-256. Gerador, game-api e launcher recusam
+> manifesto legado/futuro ou incompleto. Em 17/08, `PLAT-21` vinculou cada feed
+> e high-watermark ao canal assinado correspondente.
+>
+> **Atualização de 16/08/2026 — paridade assinada e repair incremental:** o
+> `/mods.json` agora é um envelope Ed25519 `kind: parity`, com validade e
+> sequência anti-downgrade. O launcher baixa somente arquivos divergentes com
+> `downloadUrl`, limita bytes pelo tamanho assinado, confirma acima de 500 MB,
+> revalida após commit e desfaz em falha. Runtime real ainda está pendente.
 >
 > **Atualização de 16/08/2026 — `PLAT-12` corrigido no código:** o gerador não
 > grava mais `sourceDataDir`; o manifesto público preserva apenas a procedência
@@ -60,6 +66,13 @@ Escopo declarado: o caminho **login → whitelist → launcher → update → mo
 > reconstruídos. O restart com dois clientes continua sendo teste operacional;
 > A migration v19 e o lease por conexão fecharam a revogação ampla; a prova com
 > MariaDB e dois clientes reais continua operacional.
+>
+> **Atualização de 16/08/2026 — `PLAT-01` e `PLAT-02` corrigidos no código:** o botão JOGAR passa agora por `prepare-to-play` no
+> processo principal: feeds assinados atuais, paridade, escrita e análise da
+> load order são obrigatórios antes até de entrar na fila. Fila e `launch-game`
+> exigem um recibo opaco, temporário, vinculado a conta+caminho e consumido uma
+> vez. Divergência oferece repair incremental v2 assinado/transacional, com
+> cancelamento cooperativo antes do commit e recusa segura durante publicação.
 
 ---
 
@@ -91,25 +104,30 @@ O fluxo pedido:
 Login → Whitelist → Launcher → Update → Mod Sync → Integrity → Queue → Ticket → Session → SkyMP
 ```
 
-O que `Home.tsx:61-116` realmente executa quando o jogador clica em **JOGAR**:
+O que o launcher executa quando o jogador clica em **JOGAR** desde 16/08/2026:
 
 ```
 getLauncherConfig → checkGamePath → ensureSkyrimIni(repairOnly)
-                 → verifyMods → syncLoadorder → analyzePlugins
-                 → joinQueue → [poll a cada 4 s] → launchGame
+                 → prepareToPlay(main: update assinado → verifyMods
+                   → syncLoadorder → analyzePlugins → recibo)
+                 → joinQueue(recibo) → [poll(recibo) a cada 4 s]
+                 → launchGame(recibo consumido uma vez)
 ```
 
-Duas etapas do fluxo desejado **não estão no caminho**:
-
-- **Update** não é chamado. `checkClientUpdate`, `installClientUpdate`, `checkModsUpdate` e `installModsUpdate` existem no `main.ts` e no `preload.ts`, mas o único lugar do renderer que os invoca é a tela de Configurações (`Settings.tsx:95,113,128`). Um jogador que nunca abre Configurações joga com o cliente e o modpack que instalou no primeiro dia.
-- **Repair** não existe em lugar nenhum. Não há handler, não há IPC, não há tela.
+Update agora está no caminho obrigatório. Feed ausente, chave inválida ou versão
+remota diferente bloqueia a fila; a Home oferece a ação correspondente. O único
+bypass é desenvolvimento não empacotado **sem** repo de distribuição, para a
+Fase 0 local. Um executável empacotado nunca recebe esse bypass.
 
 Havia ainda um terceiro problema descrito pela §21 do briefing: `verify-mods`
 parava na primeira divergência. Desde 16/08/2026, a comparação acumula todas as
 ausências e corrupções em uma rodada, e a Home mostra um resumo limitado. O
-caminho de reparo automático continua ausente e permanece em `PLAT-02`.
+caminho de reparo agora usa o manifesto v2 assinado para baixar somente arquivos
+divergentes que possuam `downloadUrl`, sem confiar no `contentSig` local.
 
-**Resumo honesto:** o launcher de hoje é um botão PLAY com uma verificação de paridade boa na frente. A verificação é o melhor pedaço do sistema e o beco sem saída é a consequência direta de ela não ter par — detecta e não conserta.
+**Resumo honesto:** o repair incremental está implementado e coberto no núcleo
+puro, mas rede, rollback e filesystem adverso ainda precisam de teste no
+launcher empacotado.
 
 ---
 
@@ -121,8 +139,8 @@ Severidade é sobre **o dia em que houver jogadores**, não sobre hoje. Hoje nad
 
 | ID | Achado | Evidência | Sev. |
 |---|---|---|---|
-| `PLAT-01` | Update fora do caminho de jogar | `Home.tsx:61-116` vs `Settings.tsx:95` | **Alta** |
-| `PLAT-02` | Falha de paridade é beco sem saída: detecta e não conserta | `Home.tsx:84-87` | **Alta** |
+| `PLAT-01` | **Corrigido em 16/08/2026:** feeds assinados atuais são gate de JOGAR/fila/launch | `prepare-to-play`, `launch-readiness.mjs`, `Home.tsx` | Aguardando teste operacional |
+| `PLAT-02` | **Corrigido no código em 16/08/2026:** divergência oferece repair incremental transacional; runtime empacotado pendente | `Home.tsx`, `repair-mods-incremental` | Aguardando teste operacional |
 | `PLAT-03` | **Corrigido em 16/08/2026:** launcher consulta `/status`, valida o contrato antes do IPC e apresenta todos os estados | `server-status.mjs`, `main.ts`, `Home.tsx` | Resolvida no código |
 | `PLAT-04` | Não há máquina de estados: uma string `status` e um booleano `isPlaying` | `Home.tsx:15-16` | Média |
 | `PLAT-05` | **Corrigido em 16/08/2026:** `verify-mods` acumula todas as ausências/corrupções e a Home resume sem descartar a contagem | `parity.mjs`, `parity.test.mjs`, `Home.tsx` | Resolvida no código |
@@ -138,28 +156,35 @@ falta confirmar visualmente todos os estados no executável empacotado.
 
 | ID | Achado | Evidência | Sev. |
 |---|---|---|---|
-| `PLAT-06` | `mods.json` não era versionado; corrigido em 16/08/2026 com contrato compartilhado v1 | `mods-manifest-contract.js` + gerador/loader/launcher | **Corrigido** |
-| `PLAT-07` | Zip slip: extração roda `tar -xf`/`Expand-Archive` direto sobre a pasta do jogo | `main.ts:506-521` | Média-alta |
+| `PLAT-06` | `mods.json` não era versionado; corrigido em 16/08/2026 com contrato compartilhado v2 | `mods-manifest-contract.js` + gerador/loader/launcher | **Corrigido** |
+| `PLAT-07` | **Corrigido em 16/08/2026:** diretório do ZIP e destino recusam traversal, absolutos, links, colisões Windows e zip bomb antes da extração | `archive-safety.mjs` + testes com ZIP real | **Corrigido no código** |
 | `PLAT-08` | Feed/download aceitavam qualquer host; corrigido em 16/08/2026 com allowlist exata e revalidação de redirects | `remote-source-policy.mjs` + `main.ts` | **Corrigido** |
-| `PLAT-09` | Substituição não é atômica: sem staging, sem backup, sem quarentena | `main.ts:1127` | Média |
+| `PLAT-09` | **Corrigido em 16/08/2026 no código:** staging no mesmo volume, journal prévio, backup por arquivo gerenciado, recuperação e lock interprocesso | `transactional-installer.mjs` + `main.ts` | **Aguardando teste operacional** |
 | `PLAT-10` | Paridade carregava o arquivo inteiro; corrigido em 16/08/2026 com hash sequencial por stream | `file-hash.mjs` + `main.ts` | **Corrigido** |
-| `PLAT-11` | Arquivo extra em `Data/` passa: `compareMods` só percorre a lista do servidor | `parity.mjs:113-123` | Média |
+| `PLAT-11` | Corrigido no v2: extras seguem `reject`, `warn` ou `ignore`; repair nunca os apaga | contrato + `main.ts` | **Corrigido no código** |
 | `PLAT-12` | `mods.json` publicava o path da máquina geradora; removido em 16/08/2026 | `generate-mods-manifest.js` + teste | **Corrigido** |
 | `PLAT-27` | Manifesto vazio era servido com 200; corrigido no loader em 16/08/2026 com `manifest_empty` | `modsManifest.js` + `modsManifest.test.js` | **Corrigido** |
 
-Sobre `PLAT-06`: hoje o launcher não tem como saber se entende o manifesto que recebeu. `isValidManifest` aceita qualquer objeto com `mods[]` e `loadOrder[]`. No dia em que o formato mudar, um launcher antigo lerá o manifesto novo, ignorará os campos que não conhece e **aprovará o jogador com base numa leitura parcial** — que é exatamente a classe de falha que o 503 do `/mods.json` existe pra impedir.
+Sobre `PLAT-06`: a validação estrita e compartilhada agora recusa qualquer
+versão diferente de 2 antes de consumir `files` ou `loadOrder`; não existe
+fallback para o formato legado.
 
-Sobre `PLAT-07`: o hash confere antes de extrair (isso está certo e é explícito em `main.ts:1121-1125`), mas a verificação prova que o ZIP é o ZIP esperado, não que o conteúdo dele é seguro. `tar` e `Expand-Archive` seguem `..` sem reclamar. A defesa hoje é inteiramente "o repositório de distribuição não foi comprometido". Crows trata isso como controle nomeado (`docs/MOD_SYNC_SECURITY.md`: bloqueio de `..`, caminho absoluto, symlink/junction, nome reservado e zip bomb).
+Sobre `PLAT-07`: hash e segurança estrutural são controles separados. O SHA-256
+autentica os bytes recebidos; `archive-safety.mjs` inspeciona o diretório central
+e os destinos antes de `tar`/`Expand-Archive`. Os dois cenários usam ZIP real nos
+testes automatizados, mas a mensagem e a ausência de escrita externa ainda
+precisam ser confirmadas no executável empacotado.
 
-Sobre `PLAT-10`: a assimetria foi removida. `verify-mods` calcula MD5 por stream
+Sobre `PLAT-10`: a assimetria foi removida. `verify-mods` calcula SHA-256 por stream
 e mantém somente os hashes pequenos em memória; a validação operacional de uma
 BSA real acima de 2 GB continua na lista de testes.
 
-Sobre `PLAT-11`: a direção que falta aqui é a mesma que `analyzePlugins` já corrigiu para plugins (`parity.mjs:199-211`). Para plugins, um extra é reprovado. Para BSA, não — e uma BSA extra pode sobrescrever assets de uma BSA legítima por precedência de carga.
+Sobre `PLAT-11`: a política agora é parte assinada do manifesto. `reject`
+bloqueia, `warn` informa sem bloquear e `ignore` limita a verificação aos paths
+declarados. O repair nunca apaga extras; quarentena continua como melhoria.
 
-Sobre `PLAT-27`, que apareceu ao escrever a matriz de teste e é o achado mais desconfortável desta auditoria: o cabeçalho de `modsManifest.js` declara, corretamente, que uma lista vazia *"passaria na verificação de paridade e deixaria qualquer modpack entrar, que é exatamente o oposto do que este arquivo existe pra impedir"*. Mas `isValidManifest({ mods: [], loadOrder: [] })` devolve **`true`** — `[].every()` é `true` — e `load()` não faz nenhuma checagem além dessa. O próprio teste registra o buraco sem fechá-lo: `modsManifest.test.js:33` se chama *"aceita manifesto vazio na forma, mas o loader trata o resto"*, e o loader não trata o resto.
-
-O jogador **não** entra, e é importante ser exato sobre por quê: quem barra é `analyzePlugins`, que recusa `serverLoadOrder` vazia (`parity.mjs:165-171`), no **cliente**. Ou seja, a defesa contra o pior modo de falha deste subsistema está num processo que roda na máquina do jogador, enquanto o servidor responde 200 e o comentário no servidor diz que a defesa é dele. Correção: `load()` recusa `mods` ou `loadOrder` vazios, com `reason: 'manifest_empty'`, e o 503 volta a significar o que o documento diz que significa.
+Sobre `PLAT-27`: `files` e `loadOrder` são não vazios no contrato v2. O loader
+verifica envelope e payload e responde 503 antes de servir um estado permissivo.
 
 ### 3.3 Fila, tickets e sessões
 
@@ -198,10 +223,10 @@ continua operacional.
 | `PLAT-18` | **Corrigido em 16/08/2026:** `/health` é liveness; `/ready` exige manifesto e MariaDB e retorna 503 em falha/manutenção | `readiness.js`, `server.js`, testes HTTP | Resolvida no código |
 | `PLAT-19` | **Corrigido em 16/08/2026:** `/health` não expõe fila; `/status` concentra somente estado e contagens públicas agregadas | `server.js`, `server.http.test.js` | Resolvida no código |
 | `PLAT-20` | **Corrigido em 16/08/2026:** manutenção vem de env, aparece em `/status` e recusa join/poll antes de consumir ticket | `.env.example`, `server.js` | Resolvida no código |
-| `PLAT-21` | Não há canais: `DIST_REPO` único, URLs fixas em `releases/latest/...` e `releases/download/mods/...` | `main.ts:566-572` | Média |
+| `PLAT-21` | **Corrigido em 17/08/2026:** cliente e modpack possuem canais independentes, feed próprio, campo assinado obrigatório e high-watermark por tipo+canal | `update-channel.mjs`, `main.ts`, `vite.config.ts` | **Corrigido no código** |
 | `PLAT-22` | Nenhuma pinagem reproduzível de versão (`SKYMP_COMMIT`, `HEAVY_RP_VERSION`, `MODPACK_VERSION`) | ausência | Média |
 | `PLAT-23` | Nenhuma receita de deploy: sem Dockerfile, sem unit systemd, sem workflow de deploy | `git ls-files` | Baixa hoje |
-| `PLAT-24` | Sem rollback | ausência | Baixa hoje |
+| `PLAT-24` | **Corrigido em 16/08/2026 no código:** backup N-1 e ação explícita `rollback-last-update`/Desfazer Update | `transactional-installer.mjs`, preload e Settings | **Aguardando teste operacional** |
 
 `PLAT-18/19/20` agora formam três contratos distintos. `/health` prova somente
 que o processo responde. `/ready` executa `SELECT 1` no MariaDB, valida o
@@ -219,12 +244,15 @@ Dois achados de [`docs/MODPACK.md`](../MODPACK.md) §"Notas". Ficam registrados 
 
 | ID | Achado | Evidência | Sev. |
 |---|---|---|---|
-| `PLAT-25` | `MODPACK.md` afirma: *"O launcher move automaticamente para `Data\_disabledByLauncher\` qualquer mod fora da lista"*. **Não existe quarentena no código.** Nenhuma ocorrência de `_disabledByLauncher` em `apps/` | busca no repositório | **Alta** (documental) |
-| `PLAT-26` | `MODPACK.md` afirma: *"O launcher detecta e bloqueia GOG e AE não-downgradeados"*. **Metade é verdade.** GOG é detectado (`main.ts:170-174`, via `Galaxy64.dll`/`goggame-*.info`); **build do Skyrim não é verificado em lugar nenhum** — não há leitura de versão do `SkyrimSE.exe` | `main.ts:164-176` | **Alta** (documental) |
+| `PLAT-25` | Documento afirmava quarentena inexistente; corrigido para o comportamento real de diagnóstico/remoção manual | `MODPACK.md` | **Corrigido documentalmente** |
+| `PLAT-26` | Corrigido no código: somente instalação reconhecida como Steam, sem marcadores GOG, e `SkyrimSE.exe` 1.6.1170.0 passa | `game-installation.mjs` + testes + `main.ts` | **Aguardando Skyrim real** |
 
-Os dois têm o mesmo efeito prático: quem lê a documentação acha que existe uma barreira que não existe, e desenha o modpack contando com ela. `PLAT-26` é o pior dos dois, porque a compatibilidade "exclusivamente com Steam 1.6.1170" é a premissa de todo o resto do documento — e um jogador em AE não-downgradeado passa pelo `validateGamePath` sem nenhum aviso, para descobrir o problema como um crash de SKSE.
+`PLAT-26` agora falha fechado no salvamento da pasta e novamente antes de
+prepare, update, repair, rollback e launch. A detecção exige `steam_api64.dll`,
+recusa marcadores GOG e lê `FileVersion` do executável sem interpolar o path.
 
-A correção de `PLAT-25` é escolher: ou implementar a quarentena (que a §10 desta auditoria já desenha, e que Crows também faz), ou corrigir o documento. A de `PLAT-26` é implementar a leitura de versão do executável — é barata e é justamente o tipo de checagem que a §4 do briefing quer no estado `CHECKING_MODPACK`.
+`PLAT-25` foi fechado sem prometer mutação inexistente: quarentena continua uma
+melhoria futura e o launcher hoje não apaga nem move extras automaticamente.
 
 ---
 
@@ -341,9 +369,10 @@ Regras que fazem a diferença entre isto e o `status: string` de hoje:
 
 ---
 
-## 7. Desenho: manifesto de modpack v2
+## 7. Implementado: manifesto de modpack v2
 
-Resolve `PLAT-06`, `PLAT-11` e `PLAT-12`. Formato proposto:
+Resolve no código `PLAT-06`, `PLAT-11` e `PLAT-12`. O payload abaixo fica
+dentro de um envelope Ed25519 `kind: parity`:
 
 ```jsonc
 {
@@ -351,6 +380,9 @@ Resolve `PLAT-06`, `PLAT-11` e `PLAT-12`. Formato proposto:
   "channel": "stable",           // stable | beta | development
   "build": "2026.08.13+1",       // identidade do conjunto; é o que o servidor exige na conexão
   "generatedAt": "2026-08-13T20:00:00.000Z",
+  "ignoredPaths": [
+    "Data/Platform/Plugins/skymp5-client-settings.txt"
+  ],                              // exceções exatas e assinadas; nunca glob
   "loadOrder": ["Skyrim.esm", "Update.esm", "..."],
   "extraFilePolicy": "reject",   // reject | warn | ignore — ver §11
   "files": [
@@ -358,9 +390,9 @@ Resolve `PLAT-06`, `PLAT-11` e `PLAT-12`. Formato proposto:
       "path": "Data/HeavyRP.esm",   // relativo à raiz do jogo, SEMPRE com barra normal
       "size": 12345678,
       "sha256": "…",
-      "downloadUrl": "https://…",   // ausente = não redistribuível; ver política
+      "downloadUrl": "https://…",   // opcional; ausente = instalação manual
       "required": true,
-      "category": "plugin"          // plugin | archive | script | binary | config
+      "category": "plugin"          // plugin | archive | script | binary | config | asset
     }
   ]
 }
@@ -369,7 +401,11 @@ Resolve `PLAT-06`, `PLAT-11` e `PLAT-12`. Formato proposto:
 Diferenças que não são cosméticas:
 
 - **`manifestVersion` é uma recusa, não um aviso.** Launcher que lê um `manifestVersion` maior que o que conhece entra em `ERROR` com código `MANIFEST_TOO_NEW` e a ação "atualizar o launcher". A alternativa — ignorar campos desconhecidos — é a que produz aprovação com base em leitura parcial.
-- **`build` é o identificador que vai para o servidor.** Hoje a paridade é verificada só no cliente, e um launcher modificado pula a verificação inteira. Com `build`, o gate server-side de `MOD-006` tem o que exigir. Esta auditoria **não** implementa esse gate; só garante que o manifesto carregue o dado que ele vai precisar.
+- **`build` identifica o conjunto aprovado no boot.** O gate server-side de
+  `MOD-006`, implementado em 16/08/2026, verifica o mesmo manifesto Ed25519,
+  compara sua load order com `server-settings` e `mp.getEspmLoadOrder()` e
+  registra o build aprovado. Isso prova a configuração do servidor; não prova
+  arquivos locais contra um launcher deliberadamente modificado.
 - **`path` substitui `filename`.** O formato atual só nomeia arquivos soltos em `Data/`; conteúdo de modpack vive em subpastas (`Data/SKSE/Plugins/…`, `Data/Scripts/…`). Regra de validação obrigatória, e ela é a defesa de `PLAT-07` no nível do formato:
 
   > `path` deve ser relativo, usar `/` como separador, e **não pode** conter `..`, começar com `/`, conter `:` (drive do Windows / ADS) nem casar com nome reservado do Windows (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`). O launcher rejeita o manifesto inteiro se **qualquer** entrada violar — não a entrada, o manifesto. Um manifesto com uma entrada maliciosa não é um manifesto parcialmente bom.
@@ -377,16 +413,23 @@ Diferenças que não são cosméticas:
 - **`sha256` por arquivo, e não só do ZIP.** É o que habilita repair granular (§10). Continuamos aceitando MD5? **Não.** A justificativa de MD5 em `generate-mods-manifest.js:11-19` (velocidade, e o hash não é barreira criptográfica) é válida *hoje*, mas o v2 hasheia arquivo por arquivo justamente para permitir baixar só o que quebrou — e nesse ponto o hash passa a decidir qual byte substitui qual byte. Um SHA-256 por stream custa ~2× um MD5 por stream e elimina a discussão. **A migração de MD5 para SHA-256 é uma quebra de compatibilidade e por isso é `manifestVersion: 2`.**
 - **`downloadUrl` opcional** é o que codifica a política de redistribuição. Ausente significa "este arquivo é verificado mas não distribuído por nós"; o launcher precisa então de instruções, não de um download. Detalhe em [`MOD_DISTRIBUTION_POLICY.md`](../platform/MOD_DISTRIBUTION_POLICY.md).
 - **`extraFilePolicy` torna explícito o que hoje é acidental.** Ver §11.
+- **Todo arquivo regular sob `Data/` entra no conjunto**, inclusive JavaScript
+  do Skyrim Platform e assets soltos de SkyUI, RaceMenu e itens customizados.
+  `ignoredPaths` admite somente paths canônicos exatos, dentro do envelope
+  assinado. A exceção padrão é o arquivo de settings em que o launcher injeta a
+  sessão; curingas, travessia, duplicação e colisão com `files` são recusados.
 
 ### Compatibilidade
 
-O v1 (`{ mods: [{filename, hash}], loadOrder }`) continua sendo servido enquanto houver launcher v1 em campo — o que hoje é zero, porque nunca houve distribuição. **A janela de fazer essa migração sem custo é agora**, e ela fecha no dia em que o primeiro jogador instalar o launcher.
+O v1 (`{ mods: [{filename, hash}], loadOrder }`) não é mais aceito nem servido.
+Como ainda não houve distribuição pública, a quebra foi feita antes de existir
+uma base instalada a preservar.
 
 ---
 
 ## 8. Canais
 
-`PLAT-21`. Proposta:
+`PLAT-21`, implementado no código em 17/08/2026:
 
 | Canal | Quem recebe | Regra |
 |---|---|---|
@@ -398,6 +441,10 @@ O v1 (`{ mods: [{filename, hash}], loadOrder }`) continua sendo servido enquanto
 
 Implicação de formato: o `channel` está no manifesto (§7) **e** a URL do feed muda por canal. As duas coisas — a URL diz onde buscar, o campo diz o que se recebeu, e o launcher recusa quando divergem. Um manifesto de `development` servido na URL de `stable` é um erro de publicação, e é exatamente o tipo de erro que o campo pega.
 
+No código, `stable` mantém as URLs históricas; `beta` e `development` usam tags
+próprias. O estado anti-downgrade usa chaves como `client:stable`, `mods:beta` e
+`parity:development`, impedindo interferência entre sequências dos canais.
+
 ---
 
 ## 9. Mod sync
@@ -406,14 +453,14 @@ O fluxo pedido pela §7 do briefing, com o que já existe marcado:
 
 | Passo | Hoje | Falta |
 |---|---|---|
-| buscar manifesto | ✅ `httpGetJson` | allowlist de host (`PLAT-08`) |
-| comparar com local | ⚠️ por carimbo de versão inteiro (`skymp_mods_version.txt`) | comparação por arquivo |
-| hashear os obrigatórios | ⚠️ só em `verify-mods`, com MD5 e sem stream | stream + SHA-256 (`PLAT-10`) |
-| baixar as diferenças | ⚠️ por *parte* de ZIP (`contentSig`), não por arquivo | granularidade de arquivo |
-| arquivo temporário | ✅ `app.getPath('temp')` | — |
-| verificar hash | ✅ antes de extrair, e ausência aborta | hash por arquivo extraído |
-| substituição atômica | ❌ extrai direto sobre a pasta do jogo | staging → backup → live (`PLAT-09`) |
-| validação final | ❌ | re-hash do que foi escrito |
+| buscar manifesto | ✅ HTTPS + envelope Ed25519 | teste empacotado/rede real |
+| comparar com local | ✅ tamanho + SHA-256 por path | Data real grande |
+| hashear os obrigatórios | ✅ stream sequencial SHA-256 | BSA real >2 GB |
+| baixar as diferenças | ✅ por arquivo com `downloadUrl` | CDN real/licenças |
+| arquivo temporário | ✅ staging no mesmo volume | disco cheio/antivírus |
+| verificar hash | ✅ tamanho assinado + SHA-256 antes do commit | interrupção real |
+| substituição atômica | ✅ journal, backup e rename por arquivo | queda de energia real |
+| validação final | ✅ paridade completa; rollback em falha | runtime empacotado |
 
 **O que não muda:** nunca substituir antes de validar. Isso já está certo e não deve regredir na reescrita — é a linha `main.ts:1121-1125`.
 
@@ -436,16 +483,19 @@ Não existe (`PLAT-02`). Desenho:
 
 **Regras:**
 
-1. Repair **nunca apaga** — move para quarentena. É o que Crows faz e a razão é diagnóstico: um arquivo apagado não conta o que aconteceu. Quarentena com data e motivo conta.
-2. Repair é **incremental por padrão** e tem um modo `--full` explícito. O `force` de hoje (`install-mods-update`, `main.ts:1074`) já é o modo full; falta o incremental.
-3. Repair **não roda sozinho antes de perguntar** quando implica baixar mais que um limiar (proposta: 500 MB). Um jogador com internet limitada precisa saber antes, não depois.
+1. Repair **nunca apaga** extras. Hoje ele recusa e orienta correção manual;
+   quarentena permanece pendente.
+2. Repair é **incremental por padrão**; a atualização integral assinada continua
+   disponível como ação separada de atualização do modpack.
+3. Repair **não roda antes de perguntar** quando implica baixar mais de 500 MB.
+   Um jogador com internet limitada precisa saber antes, não depois.
 4. O relatório de repair lista **todos** os arquivos, não o primeiro — a correção de `PLAT-05` no nível de dados.
 
 ---
 
 ## 11. Política de arquivo extra
 
-`PLAT-11` e `PLAT-12`. Hoje o comportamento é inconsistente por acidente: plugin extra reprova (`parity.mjs:204-211`), arquivo extra não é sequer olhado.
+`PLAT-11` e `PLAT-12`. O contrato v2 assinado torna a decisão explícita:
 
 Proposta — o manifesto declara, o launcher obedece:
 
@@ -455,9 +505,10 @@ Proposta — o manifesto declara, o launcher obedece:
 | `warn` | Reporta, não bloqueia | Fase 0 e teste, onde os testadores têm instalação própria |
 | `ignore` | Só verifica o que o manifesto lista | Desenvolvimento |
 
-**Plugins continuam sendo caso à parte, sempre `reject`**, independente da política — porque plugin extra desloca índice de load order e portanto quebra o contrato de FormID, o que nenhuma política de conveniência pode relaxar. Textura extra não desloca nada. A distinção já está implícita no gerador (`generate-mods-manifest.js:29-34`, que só hasheia plugins e BSAs); a política a torna explícita.
+**Plugins continuam sendo caso à parte, sempre `reject`**, independente da política — porque plugin extra desloca índice de load order e portanto quebra o contrato de FormID, o que nenhuma política de conveniência pode relaxar. O gerador agora hasheia todo arquivo regular sob `Data/`; `extraFilePolicy` controla o tratamento dos extras e `ignoredPaths` só exclui estado dinâmico explicitamente assinado.
 
-Isto **é uma decisão de produto pendente**, ligada ao `MOD-005` do roadmap ("decisão de produto aberta"). Esta auditoria propõe o mecanismo, não escolhe o valor padrão para produção.
+O gerador exige a escolha e usa `reject` como padrão seguro de produção.
+`warn` e `ignore` permanecem disponíveis para beta/desenvolvimento.
 
 ---
 

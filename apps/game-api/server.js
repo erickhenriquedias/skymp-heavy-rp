@@ -133,7 +133,9 @@ function scheduleCredentialCleanup(options) {
   }
 }
 
-const manifestLoader = createManifestLoader(MANIFEST_PATH);
+const manifestLoader = createManifestLoader(MANIFEST_PATH, {
+  publicKeys: process.env.MODS_MANIFEST_PUBLIC_KEYS || ''
+});
 const queue = createQueue({ capacity: parseInt(process.env.QUEUE_CAPACITY || '40', 10) });
 let maintenanceMode = readBooleanEnv('MAINTENANCE_MODE');
 let maintenanceMessage = normalizeMaintenanceMessage(process.env.MAINTENANCE_MESSAGE);
@@ -357,7 +359,7 @@ app.get('/mods.json', (req, res) => {
     console.error(`[game-api] Manifesto indisponivel: ${result.reason} (${MANIFEST_PATH})`);
     return res.status(503).json({ error: 'Manifesto de mods indisponivel no servidor.' });
   }
-  res.json(result.manifest);
+  res.json(result.envelope);
 });
 
 // ── Fila ────────────────────────────────────────────────────────────────────
@@ -631,16 +633,36 @@ async function startServer() {
   const manifest = manifestLoader.load();
   if (!manifest.ok) {
     console.warn(`[game-api] ATENCAO: manifesto de mods indisponivel (${manifest.reason}).`);
-    console.warn('[game-api] Gere com: node scripts/generate-mods-manifest.js <caminho-do-Data>');
+    console.warn('[game-api] Gere com: node scripts/generate-mods-manifest.js <Data> --plugins-txt <plugins.txt> --build <id> --sequence <n> --key-id <id>');
     console.warn('[game-api] Ate la, /mods.json responde 503 e nenhum jogador consegue entrar.');
   } else {
-    console.log(`[game-api] Manifesto: ${manifest.manifest.mods.length} arquivos, ${manifest.manifest.loadOrder.length} plugins.`);
+    console.log(`[game-api] Manifesto v2 assinado: ${manifest.manifest.files.length} arquivos, ${manifest.manifest.loadOrder.length} plugins.`);
   }
   return server;
 }
 
 if (require.main === module) {
-  startServer().catch(async (err) => {
+  let serverInstance = null;
+  let shutdownPromise = null;
+  const shutdown = (signal) => {
+    if (shutdownPromise) return shutdownPromise;
+    shutdownPromise = (serverInstance
+      ? new Promise(resolve => serverInstance.close(resolve))
+      : Promise.resolve())
+      .then(() => pool.end())
+      .then(() => console.log(`[game-api] Encerrada por ${signal}.`))
+      .catch(error => {
+        process.exitCode = 1;
+        console.error(`[game-api] Falha no shutdown: ${error.message}`);
+      });
+    return shutdownPromise;
+  };
+  process.once('SIGINT', () => shutdown('SIGINT'));
+  process.once('SIGTERM', () => shutdown('SIGTERM'));
+
+  startServer().then(server => {
+    serverInstance = server;
+  }).catch(async (err) => {
     console.error('[game-api] Boot recusado: nao foi possivel recuperar a fila:', err.message);
     process.exitCode = 1;
     try { await pool.end(); } catch (_) { /* erro original governa o exit code */ }

@@ -33,7 +33,7 @@ Esta pesquisa **não adiciona nenhuma tarefa em P0**, de propósito. A única co
 | `SEC-QS-01` | Ticket de fila sai da query string; harness de teste HTTP para `game-api` | achado no **nosso** código | fix | ✅ **feito 13/08** |
 | `PATCH-001` | Estrutura `patches/` com manifesto, motivo, commit upstream e condição de perda | Divine Comedy | ADAPT | ✅ **feito 13/08** |
 | `MOD-005` | Paridade cobre o que o jogo carrega fora de `Data/` (`Skyrim.ccc`) | Divine Comedy | ADAPT | ✅ **detecção feita 13/08**; decisão de produto aberta |
-| `MOD-006` | Gate de load order server-side que recusa boot sem evidência de resolução de FormID | Frostfall | ADAPT | pendente — depende de `MOD-005` |
+| `MOD-006` | Gate de load order server-side que recusa boot sem evidência de resolução de FormID | Frostfall | ADAPT | ✅ código em 16/08; runtime SkyMP pendente |
 | `RES-001` | Ler a fundo os 5 módulos prioritários do Frostfall | Frostfall | RESEARCH | pendente |
 | `RES-002` | Ler a fundo `ModSyncTests` e o RBAC do Crows | Crows | RESEARCH | pendente |
 
@@ -225,7 +225,7 @@ Fase 0  ────────────────────────
    ├─ não bloqueado    RES-001 · RES-002 · INV-002
    │
    └─ depois da Fase 0
-        MOD-006 → MOD-007
+        ✅ MOD-006 → MOD-007
         MOUNT-001 → MOUNT-002        (PATCH-001 já é pré-requisito atendido)
         RES-002 → RBAC-001
 ```
@@ -241,7 +241,7 @@ O que **não** foi implementado, e por quê:
 | `MOUNT-001` | ~700 linhas de C++ em física do Havok. Exige clonar o SkyrimPlatform, compilar e um spike com rollback. Não cabe junto de outras mudanças, e a Fase 0 vem antes |
 | `INV-002` | Fronteira declarada contra `mp`, no modelo `adapters/inventory/{protocol,skymp,fake}` do Crows. O razão de duas pernas resolveu o lado do servidor; o lado do jogo continua mockado ad-hoc. Não depende da Fase 0 |
 | `RBAC-001` | Depende de `RES-002`: não lemos uma linha do RBAC do Crows, só nomes de arquivo |
-| `MOD-006/007` | Dependem da decisão de produto de `MOD-005` e de `MOD-001..004` |
+| `MOD-007` | Depende da estratégia de canais e de `MOD-001..004`; `MOD-006` já está implementado no código |
 
 ## O que a entrega de 13/08 não mudou
 

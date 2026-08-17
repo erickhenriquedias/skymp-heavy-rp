@@ -2,7 +2,9 @@
 
 O que está coberto, o que não está, e **por que** cada linha existe.
 
-**Data:** 13/08/2026 · Suíte: `npm test` — 716 testes, 169 suítes, 0 falhas.
+**Atualizada em:** 16/08/2026 · Suíte principal — 895 testes, 203 suítes,
+894 aprovados, 1 ignorado local, 0 falhas. O `pretest` de lifecycle executa
+mais 5 testes antes dela.
 Novos nesta rodada: 45 em `core/inventory.test.js`, 25 em
 `trade-service.test.js`.
 
@@ -151,14 +153,10 @@ de teste vive neste projeto.
 
 ### 6.2 A migração v14
 
-`check-schema-drift.js` confere tabela, coluna e índice — e **não reconhece
-`MODIFY COLUMN`**. A mudança de nulabilidade de
-`inventory_transactions.character_id` não aparece como drift se a migração for
-pulada. Conferência manual:
-
-```sql
-SHOW COLUMNS FROM inventory_transactions LIKE 'character_id';
-```
+Fechado no código em 16/08/2026. `check-schema-drift.js` acompanha a
+nulabilidade final declarada por `CREATE`, `ADD` e `MODIFY COLUMN`, consulta
+`information_schema.COLUMNS.IS_NULLABLE` e reprova a diferença indicando a
+migration de origem. Há regressão específica para o `character_id` da v14.
 
 A consolidação de duplicatas da migração também não tem teste: ela roda uma vez,
 contra dado que talvez não exista.
@@ -179,15 +177,14 @@ Não existem. Não há teste porque não há comportamento.
 `addItem`, `packStall` e `removeItem` passaram a mover o inventário **dentro** da
 transação da barraca. `market-stalls-purchase.test.js` e
 `market-stalls-service.test.js` continuam verdes e cobrem a compra, que já era
-o caminho correto. **A atomicidade nova dos outros três não tem teste próprio** —
-a mudança é estrutural (mesmas primitivas, dentro do `BEGIN` que já existia) e
-verificável por leitura, mas isso é mais fraco que os outros itens desta matriz.
-
-É a lacuna mais acionável da lista.
+o caminho correto. `market-stalls-service.hardening.test.js` agora prova que
+estoque, ledger e anúncio usam a mesma conexão antes do commit em
+`addItem`/`removeItem`/`packStall`, e que uma falha no INSERT do anúncio pede
+rollback depois da retirada da pilha.
 
 ### 6.6 Uma sessão real
 
-Zero jogadores. 716 testes verdes provam que o código faz o que os testes dizem;
+Zero jogadores. 895 testes principais provam que o código faz o que os testes dizem;
 não provam que o SkyMP se comporta como este projeto assume.
 
 ---

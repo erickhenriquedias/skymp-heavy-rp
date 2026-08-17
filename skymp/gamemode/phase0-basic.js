@@ -57,6 +57,9 @@ const { installUiEventGateway } = require(path.join(gamemodeDir, 'core', 'ui-eve
 const { createUiEventRateLimiter } = require(path.join(gamemodeDir, 'core', 'ui-event-rate-limiter'));
 const { createConnectionMonitor } = require(path.join(gamemodeDir, 'core', 'connection-monitor'));
 const { createGameApiSessionClient } = require(path.join(gamemodeDir, 'core', 'game-api-session-client'));
+const { assertServerLoadOrder } = require(path.join(gamemodeDir, 'core', 'load-order-gate'));
+const { createManifestLoader } = require(path.join(gamemodeDir, '..', 'packages', 'mods-manifest-loader'));
+const runtimeLifecycle = require(path.join(gamemodeDir, 'core', 'runtime-lifecycle'));
 const serverOptions  = require(path.join(gamemodeDir, 'core', 'server-options'));
 const { validateServerConfig } = require(path.join(gamemodeDir, 'scripts', 'check-server-config'));
 const governance    = require(path.join(gamemodeDir, 'governance-service'));
@@ -147,6 +150,10 @@ const interactionService = createInteractionService({
   }
 });
 
+let unsubscribeTradeDisconnect = null;
+
+function registerModules() {
+
 moduleRegistry.register({
   id: 'interaction',
   enabledBy: 'ENABLE_INTERACTION_FRAMEWORK',
@@ -172,6 +179,9 @@ moduleRegistry.register({
   commands: [],
   initialize: async () => {
     require(path.join(gamemodeDir, 'npc-cleaner')).startWorldCleaner();
+  },
+  shutdown: async () => {
+    require(path.join(gamemodeDir, 'npc-cleaner')).stopWorldCleaner();
   }
 });
 
@@ -184,6 +194,9 @@ moduleRegistry.register({
   commands: deathService.commandDefs(),
   initialize: async () => {
     deathService.initDeathService();
+  },
+  shutdown: async () => {
+    deathService.shutdownDeathService();
   }
 });
 
@@ -307,6 +320,9 @@ moduleRegistry.register({
     }
 
     voipService.startVoipServer();
+  },
+  shutdown: async () => {
+    await voipService.stopVoipServer();
   }
 });
 
@@ -393,12 +409,16 @@ moduleRegistry.register({
     // outro fica preso numa troca com um ausente até o TTL. O gancho é
     // assinado aqui, e não no `commands.js`, para que ele não conheça um
     // módulo que pode estar desligado.
-    commands.onCharacterRemoved(tradeService.onDisconnect);
+    unsubscribeTradeDisconnect = commands.onCharacterRemoved(tradeService.onDisconnect);
   },
   shutdown: async () => {
+    if (unsubscribeTradeDisconnect) unsubscribeTradeDisconnect();
+    unsubscribeTradeDisconnect = null;
     tradeService.sweep();
   }
 });
+
+}
 
 // PARKED — Existem no disco e NÃO são registrados até passarem por reengenharia:
 // - economy-regional  (ENABLE_REGIONAL_ECONOMY)
@@ -452,7 +472,8 @@ async function boot() {
   }
 
   if (typeof mp !== 'undefined') {
-    const findings = validateServerConfig(mp.getServerSettings(), {
+    const serverSettings = mp.getServerSettings();
+    const findings = validateServerConfig(serverSettings, {
       environment: process.env.NODE_ENV || 'production'
     });
     for (const finding of findings.filter(item => item.level === 'WARN')) {
@@ -466,6 +487,32 @@ async function boot() {
       );
     }
     console.log('[phase0] Server/auth configuration approved');
+
+    const manifestPath = path.resolve(
+      gamemodeDir,
+      process.env.PARITY_MANIFEST_PATH || '../../apps/game-api/mods.json'
+    );
+    const manifestResult = createManifestLoader(manifestPath, {
+      publicKeys: process.env.MODS_MANIFEST_PUBLIC_KEYS || ''
+    }).load();
+    if (!manifestResult.ok) {
+      throw new Error(`manifesto de paridade reprovado: ${manifestResult.reason}`);
+    }
+    let effectiveLoadOrder;
+    try {
+      effectiveLoadOrder = mp.getEspmLoadOrder();
+    } catch (error) {
+      throw new Error(`mp.getEspmLoadOrder falhou: ${error.message}`);
+    }
+    assertServerLoadOrder({
+      manifestLoadOrder: manifestResult.manifest.loadOrder,
+      configuredLoadOrder: serverSettings.loadOrder,
+      effectiveLoadOrder
+    });
+    console.log(
+      `[phase0] Load order approved (${effectiveLoadOrder.length} plugins; ` +
+      `modpack=${manifestResult.manifest.build}; parity sequence=${manifestResult.release.sequence})`
+    );
   }
 
   db.init();
@@ -490,8 +537,9 @@ async function boot() {
 
 let connectionMonitor = null;
 let uiEventMetricsTimer = null;
+let uiEventGateway = null;
 let runtimeStarted = false;
-let shuttingDown = false;
+let shutdownPromise = null;
 
 function startRuntime() {
   if (runtimeStarted) return;
@@ -565,7 +613,7 @@ if (typeof mp !== "undefined") {
 
   // O limitador é o mesmo criado lá em cima, compartilhado com o Interaction
   // Framework — ver a nota naquele bloco.
-  installUiEventGateway(mp, {
+  uiEventGateway = installUiEventGateway(mp, {
     uiEventRouter,
     handleChatInput: commands.handleChatInput,
     rateLimiter: uiEventRateLimiter
@@ -611,36 +659,59 @@ if (typeof mp !== 'undefined') {
 }
 
 async function shutdown(reason) {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  console.log(`[phase0] Shutdown iniciado (${reason}).`);
+  if (shutdownPromise) return shutdownPromise;
+  shutdownPromise = (async () => {
+    console.log(`[phase0] Shutdown iniciado (${reason}).`);
+    const failures = [];
 
-  if (connectionMonitor) connectionMonitor.stop();
-  if (uiEventMetricsTimer) clearInterval(uiEventMetricsTimer);
-  await moduleRegistry.shutdownAll();
-  await db.close();
-  console.log('[phase0] Shutdown concluído.');
+    try {
+      if (connectionMonitor) connectionMonitor.stop();
+    } catch (err) {
+      failures.push(`monitor: ${err.message}`);
+    }
+    connectionMonitor = null;
+    if (uiEventMetricsTimer) clearInterval(uiEventMetricsTimer);
+    uiEventMetricsTimer = null;
+    if (typeof mp !== 'undefined' && mp.onUiEvent === uiEventGateway) delete mp.onUiEvent;
+    uiEventGateway = null;
+    try {
+      await moduleRegistry.shutdownAll();
+    } catch (err) {
+      failures.push(`modulos: ${err.message}`);
+    }
+    try {
+      await db.close();
+    } catch (err) {
+      failures.push(`MariaDB: ${err.message}`);
+    }
+    console.log('[phase0] Shutdown concluído.');
+    if (failures.length > 0) {
+      throw new Error(`shutdown incompleto: ${failures.join('; ')}`);
+    }
+  })();
+  return shutdownPromise;
 }
 
-for (const signal of ['SIGINT', 'SIGTERM']) {
-  process.once(signal, () => {
-    shutdown(signal)
-      .then(() => process.exit(0))
-      .catch(err => {
-        console.error('[phase0] Falha durante shutdown:', err.message);
-        process.exit(1);
-      });
-  });
-}
-
-boot()
-  .then(startRuntime)
-  .catch(async err => {
+async function startInstance() {
+  moduleRegistry.prepareForBoot();
+  registerModules();
+  try {
+    await boot();
+    startRuntime();
+    return { shutdown };
+  } catch (err) {
     console.error('[phase0] Fatal: Could not initialize database or core services:', err.message);
     try {
       await shutdown('boot failure');
     } catch (shutdownError) {
       console.error('[phase0] Falha ao limpar boot parcial:', shutdownError.message);
     }
-    process.exit(1);
-  });
+    throw err;
+  }
+}
+
+runtimeLifecycle.replace(startInstance).catch(() => {
+  // O erro detalhado e o cleanup ja foram registrados por startInstance.
+  // Sem runtime valido, continuar aceitando processo seria fail-open.
+  process.exit(1);
+});

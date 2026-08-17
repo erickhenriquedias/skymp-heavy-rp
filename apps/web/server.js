@@ -19,6 +19,7 @@ const {
   persistDiscordRoleAccess
 } = require('./discord-role-access');
 const { createStaffGuard } = require('./staff-access');
+const { persistObservedSteamIdentity, fetchDiscordConnections } = require('./steam-identity');
 const { createSlidingWindowRateLimiter } = require('../../skymp/packages/sliding-rate-limiter');
 const { notifySessionConnected } = require('./session-occupancy-notifier');
 
@@ -50,10 +51,19 @@ let sessionOccupancyNotifier = ({ accountId, sessionId }) => notifySessionConnec
   accountId,
   sessionId
 });
+let panelReadinessProbe = async () => {
+  const rows = await db('SELECT 1 AS ready');
+  return Array.isArray(rows) && Number(rows[0]?.ready) === 1;
+};
 
 function setSessionOccupancyNotifierForTests(notifier) {
   if (typeof notifier !== 'function') throw new TypeError('notifier deve ser função');
   sessionOccupancyNotifier = notifier;
+}
+
+function setPanelReadinessProbeForTests(probe) {
+  if (typeof probe !== 'function') throw new TypeError('probe deve ser função');
+  panelReadinessProbe = probe;
 }
 
 /** Comparação em tempo constante, tolerante a tamanhos diferentes. */
@@ -102,6 +112,17 @@ async function refreshDiscordRoleAccess(accountId, discordId) {
     matchedRoleId: access.matchedRoleId,
     ttlSeconds: DISCORD_ROLE_ACCESS_TTL_SECONDS
   });
+}
+
+async function observeSteamIdentity(accountId, connections) {
+  try {
+    return await persistObservedSteamIdentity({ pool, accountId, connections });
+  } catch (error) {
+    // Steam é metadado secundário. Uma falha aqui nunca pode transformar o
+    // Discord válido em falha de autenticação nem liberar acesso adicional.
+    console.error(`[steam-identity] Falha ao atualizar identificador da conta ${accountId}: ${error.message}`);
+    return { linked: false, reason: 'persistence_failed', steamId: null };
+  }
 }
 
 const fsp = fs.promises;
@@ -176,6 +197,9 @@ passport.use(new DiscordStrategy({
     // Precisa bater EXATAMENTE com a Redirect URI cadastrada no portal do
     // Discord, senão a autenticação falha com `invalid_request`.
     callbackURL: process.env.DISCORD_CALLBACK_URL || `${CORS_ORIGINS[0]}/api/auth/discord/callback`,
+    // `connections` é pedido na rota de autorização, mas consultado por nós em
+    // best-effort. O passport-discord transformaria falha desse metadado em
+    // falha da autenticação principal, o que violaria a regra Discord-only.
     scope: ['identify']
 }, async (accessToken, refreshToken, profile, done) => {
     try {
@@ -196,7 +220,16 @@ passport.use(new DiscordStrategy({
             console.error(`[discord-role-access] Falha ao verificar ${profile.id}: ${roleError.message}`);
         }
 
-        return done(null, { id: profile.id, username: profile.username, avatar: profile.avatar, accountId });
+        const connections = await fetchDiscordConnections(accessToken);
+        const steamIdentity = await observeSteamIdentity(accountId, connections);
+
+        return done(null, {
+          id: profile.id,
+          username: profile.username,
+          avatar: profile.avatar,
+          accountId,
+          steamId: steamIdentity.steamId
+        });
     } catch(err) {
         return done(err, null);
     }
@@ -214,7 +247,9 @@ const requireStaff = createStaffGuard(db);
 const requireWhitelistPermission = createStaffGuard(db, 'manage_whitelist');
 const requireAuditPermission = createStaffGuard(db, 'view_audit');
 
-app.get('/api/auth/discord', passport.authenticate('discord'));
+app.get('/api/auth/discord', passport.authenticate('discord', {
+  scope: ['identify', 'connections']
+}));
 app.get('/api/auth/discord/callback', passport.authenticate('discord', {
     failureRedirect: '/?error=auth_failed'
 }), (req, res) => {
@@ -378,12 +413,13 @@ app.get('/api/whitelist', requireWhitelistPermission, async (req, res) => {
   try {
     const rows = await db(
       `SELECT wa.id, wa.status, wa.created_at, wa.reviewer_notes,
-              d.username as discord_name, d.discord_id,
+              d.username as discord_name, d.discord_id, s.steam_id,
               c.first_name, c.last_name, c.biography, c.motivations, c.weaknesses,
               c.social_ties, c.needs_extra_review, c.extra_review_notes
        FROM whitelist_applications wa
        LEFT JOIN accounts a ON a.id = wa.account_id
        LEFT JOIN discord_identities d ON d.account_id = a.id
+       LEFT JOIN steam_identities s ON s.account_id = a.id
        LEFT JOIN characters c ON c.id = wa.character_id
        ORDER BY wa.status='pending' DESC, wa.created_at DESC
        LIMIT 100`
@@ -501,13 +537,14 @@ app.get('/api/characters', requireStaff, async (req, res) => {
     const search = req.query.q ? `%${req.query.q}%` : '%';
     const rows = await db(
       `SELECT c.id, c.first_name, c.last_name, c.status, c.gold, c.created_at,
-              d.username as discord_name
+              d.username as discord_name, s.steam_id
        FROM characters c
        LEFT JOIN accounts a ON a.id = c.account_id
        LEFT JOIN discord_identities d ON d.account_id = a.id
-       WHERE c.first_name LIKE ? OR c.last_name LIKE ? OR d.username LIKE ?
+       LEFT JOIN steam_identities s ON s.account_id = a.id
+       WHERE c.first_name LIKE ? OR c.last_name LIKE ? OR d.username LIKE ? OR s.steam_id LIKE ?
        ORDER BY c.created_at DESC LIMIT 50`,
-      [search, search, search]
+      [search, search, search, search]
     );
     res.json(rows);
   } catch (err) { console.error('[/api/characters]', err); res.status(500).json({ error: 'Erro interno do servidor' }); }
@@ -872,6 +909,8 @@ app.post('/api/launcher/oauth/exchange', async (req, res) => {
     const user = await userRes.json();
     if (!user.id) return res.status(401).json({ error: 'Falha ao ler o perfil do Discord.' });
 
+    const connections = await fetchDiscordConnections(token.access_token);
+
     // A conta precisa existir antes de emitir ticket — quem nunca passou pelo
     // painel não tem whitelist, então não tem o que fazer na fila.
     const accountRows = await db('SELECT account_id FROM discord_identities WHERE discord_id = ?', [user.id]);
@@ -888,6 +927,8 @@ app.post('/api/launcher/oauth/exchange', async (req, res) => {
     // Discord de fato autenticou. O ticket carrega essa prova até a fila
     // (apps/game-api), que não teria como verificar nada sozinha.
     if (accountId) {
+      const steamIdentity = await observeSteamIdentity(accountId, connections);
+      profile.steamId = steamIdentity.steamId;
       try {
         profile.discordRoleAccess = await refreshDiscordRoleAccess(accountId, user.id);
       } catch (roleError) {
@@ -912,6 +953,18 @@ app.post('/api/launcher/oauth/exchange', async (req, res) => {
 // num painel que também serve autenticação era só um convite a alguém apontar o
 // launcher pra ele. Ver docs/technical/LAUNCHER_DISTRIBUTION.md.
 
+// Liveness não toca dependências. Readiness prova que o painel ainda consegue
+// consultar a fonte de verdade antes de o supervisor anunciá-lo como pronto.
+app.get('/health', (_req, res) => res.json({ ok: true }));
+app.get('/ready', async (_req, res) => {
+  try {
+    const ready = await panelReadinessProbe();
+    return res.status(ready ? 200 : 503).json({ ready, checks: { database: ready } });
+  } catch {
+    return res.status(503).json({ ready: false, checks: { database: false } });
+  }
+});
+
 // ── Catch-all: SPA ─────────────────────────────────────────────────────────
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
@@ -921,9 +974,23 @@ app.get('*', (req, res) => {
 // ser montado num servidor efêmero — sem isso, importar este arquivo num teste
 // abriria a porta 3001 de verdade.
 if (require.main === module) {
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
     console.log(`[staff-panel] Painel rodando em http://localhost:${PORT}`);
   });
+  let shutdownPromise = null;
+  const shutdown = (signal) => {
+    if (shutdownPromise) return shutdownPromise;
+    shutdownPromise = new Promise(resolve => server.close(resolve))
+      .then(() => pool.end())
+      .then(() => console.log(`[staff-panel] Encerrado por ${signal}.`))
+      .catch(error => {
+        process.exitCode = 1;
+        console.error(`[staff-panel] Falha no shutdown: ${error.message}`);
+      });
+    return shutdownPromise;
+  };
+  process.once('SIGINT', () => shutdown('SIGINT'));
+  process.once('SIGTERM', () => shutdown('SIGTERM'));
 }
 
 module.exports = {
@@ -933,5 +1000,6 @@ module.exports = {
   hashTicket,
   pruneCrashReports,
   CRASH_REPORT_DIR,
-  setSessionOccupancyNotifierForTests
+  setSessionOccupancyNotifierForTests,
+  setPanelReadinessProbeForTests
 };

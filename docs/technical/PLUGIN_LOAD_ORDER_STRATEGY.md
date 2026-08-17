@@ -85,17 +85,25 @@ Quatro camadas, da mais barata para a mais cara. As três primeiras não depende
 
 ### `LOP-002` — a load order do servidor vem do servidor
 
-`mp.getEspmLoadOrder()` devolve, **em runtime**, os nomes de arquivo que o servidor realmente carregou — na ordem em que ele os indexa. É a fonte de verdade, e não usamos.
+`mp.getEspmLoadOrder()` devolve, **em runtime**, os nomes de arquivo que o servidor realmente carregou — na ordem em que ele os indexa. É a fonte de verdade.
 
 Hoje o manifesto declara a load order pretendida. `getEspmLoadOrder` diz a efetiva. Entre as duas cabe um erro de configuração inteiro: um plugin listado que não abriu, um caminho relativo que resolveu para outro arquivo, uma diferença de caixa.
 
-O gamemode expõe a lista efetiva; a `game-api` a serve ao launcher; o launcher compara contra o que o jogador tem. **A paridade passa a comparar o cliente com o servidor real, não com a intenção do servidor.**
+Desde 16/08/2026, o gamemode compara essa lista com
+`server-settings.loadOrder` e com o `loadOrder` do mesmo manifesto Ed25519 que a
+`game-api` serve ao launcher. Como o boot é recusado quando qualquer uma das
+três diverge, o manifesto público passa a representar a ordem efetivamente
+carregada, não apenas a intenção de configuração.
 
 ### `LOP-003` — gate de boot server-side
 
 O `MOD-006` do roadmap, vindo do `loadOrderGate.js` do Frostfall, com uma peça que a nossa versão pode ter e a deles não: **`getEspmLoadOrder` comparado contra o manifesto no próprio boot.**
 
-O servidor se recusa a subir se a lista efetiva divergir da declarada. Falha cedo, alto, e na máquina que a operação controla — em vez de falhar na máquina do jogador, no meio de uma cena, como `"invalid file index"`.
+Implementado em `core/load-order-gate.js` e ligado antes de `db.init()`. O
+servidor se recusa a subir se o manifesto estiver ausente, inválido, expirado
+ou se a lista efetiva/configurada divergir da assinada. Falha cedo, alto, e na
+máquina que a operação controla — em vez de falhar na máquina do jogador, no
+meio de uma cena, como `"invalid file index"`.
 
 Mesma filosofia *fail-closed* do `server-options`.
 
@@ -134,5 +142,8 @@ Também é a maior. Mexe no formato do descritor, na aritmética de índice, na 
 ## 7. O que continua sem prova
 
 - **Nada aqui foi testado em jogo.** A não-existência de ESL é ausência de código, que é a evidência mais forte disponível sem sessão — mas continua sendo leitura.
-- **`getEspmLoadOrder` nunca foi chamada por nós.** A assinatura foi lida em `ScampServer.cpp:1235`; o retorno real, não.
+- **`getEspmLoadOrder` agora faz parte do boot, mas o retorno ainda não foi
+  observado neste binário SkyMP com o manifesto real.** A assinatura é
+  conhecida e a integração possui teste estrutural; a forma/ordem real continua
+  pendente de runtime.
 - **A hipótese do deslocamento por ESL é dedução**, apoiada pelo relato do Divine Comedy. Confirmá-la exige um servidor com um ESL na lista e um cliente — e isso é exatamente o tipo de coisa que não se descobre sem a Fase 0.

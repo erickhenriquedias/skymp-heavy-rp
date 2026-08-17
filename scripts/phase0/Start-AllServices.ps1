@@ -1,3 +1,12 @@
+param(
+  [ValidateSet("local", "staging", "production")]
+  [string]$Environment = "local",
+  [switch]$CheckOnly,
+  [switch]$NoSkyMP,
+  [ValidateRange(5, 600)]
+  [int]$StartupTimeoutSeconds = 60
+)
+
 # Start-AllServices.ps1
 # Script de orquestração para inicializar todos os serviços do servidor simultaneamente.
 #
@@ -51,24 +60,51 @@ foreach ($svc in $services) {
   $ready += $svc
 }
 
-# O manifesto de mods nao impede o boot, mas sem ele nenhum jogador passa da
-# verificacao de paridade — entao avisamos alto em vez de deixar descobrir em jogo.
+# O manifesto agora e gate do proprio boot: gamemode compara a assinatura e a
+# load order efetiva antes de abrir banco/runtime.
 $manifestPath = Join-Path $rootDir "apps\game-api\mods.json"
 if (-not (Test-Path -LiteralPath $manifestPath)) {
-  Write-Warning "apps\game-api\mods.json nao existe: /mods.json vai responder 503 e nenhum jogador consegue entrar."
-  Write-Warning "Gere com: cd apps\game-api; node scripts\generate-mods-manifest.js `"<pasta Data do servidor>`" --plugins-txt `"<plugins.txt>`""
-  Write-Host ""
+  $problems += "API do Jogo: apps\game-api\mods.json ausente; readiness nunca aprovaria. Gere o manifesto antes do boot."
+}
+
+if (-not $NoSkyMP) {
+  $serverEntry = Join-Path $rootDir "skymp\server\dist_back\skymp5-server.js"
+  $serverSettings = Join-Path $rootDir "skymp\server\server-settings.json"
+  if (-not (Test-Path -LiteralPath $serverEntry)) {
+    $problems += "Servidor SkyMP: artefato ausente. Execute scripts\phase0\Install-SkyMPServerArtifact.ps1."
+  }
+  if (-not (Test-Path -LiteralPath $serverSettings)) {
+    $problems += "Servidor SkyMP: server-settings.json ausente no artefato instalado."
+  } else {
+    $doctor = Join-Path $rootDir "skymp\gamemode\scripts\check-server-config.js"
+    $doctorOutput = & node $doctor $serverSettings "--environment=$Environment" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+      $problems += "Servidor SkyMP: config doctor reprovou server-settings.json para $Environment."
+      foreach ($line in $doctorOutput) { Write-Host "  $line" -ForegroundColor Red }
+    }
+  }
 }
 
 # O boot agora aplica migrations antes dos modulos e falha fechado. Este check
 # continua util como diagnostico antecipado, antes de abrir as janelas.
 $gamemodeDir = Join-Path $rootDir "skymp\gamemode"
+$gamemodeEnv = Join-Path $gamemodeDir ".env"
+if (-not (Test-Path -LiteralPath $gamemodeEnv)) {
+  $problems += "Gamemode: falta skymp\gamemode\.env; o gate de load order nao possui chaves publicas."
+} else {
+  $gamemodeEnvText = Get-Content -LiteralPath $gamemodeEnv -Raw
+  if ($gamemodeEnvText -notmatch '(?m)^\s*MODS_MANIFEST_PUBLIC_KEYS\s*=\s*\{.+\}\s*$' -or
+      $gamemodeEnvText -match 'COLE_A_CHAVE_PUBLICA') {
+    $problems += "Gamemode: MODS_MANIFEST_PUBLIC_KEYS ausente ou placeholder; copie o mesmo JSON publico da game-api."
+  }
+}
 if (Test-Path -LiteralPath (Join-Path $gamemodeDir "node_modules")) {
   Push-Location $gamemodeDir
   try {
     $driftOutput = & node "scripts\check-schema-drift.js" 2>&1
     if ($LASTEXITCODE -ne 0) {
-      Write-Warning "Banco desalinhado das migrations. Os servicos sobem, mas vao falhar em runtime:"
+      $problems += "MariaDB indisponivel ou schema desalinhado; nenhum servico sera iniciado."
+      Write-Warning "Banco indisponivel ou desalinhado das migrations:"
       foreach ($linha in $driftOutput) { Write-Host "  $linha" -ForegroundColor Yellow }
       Write-Host ""
     }
@@ -77,34 +113,30 @@ if (Test-Path -LiteralPath (Join-Path $gamemodeDir "node_modules")) {
   } finally {
     Pop-Location
   }
+} else {
+  $problems += "Gamemode: dependencias ausentes. Rode: cd skymp\gamemode; npm ci"
 }
 
 if ($problems.Count -gt 0) {
-  Write-Host "Servicos que NAO vao subir:" -ForegroundColor Red
+  Write-Host "Preflight REPROVADO; nenhum processo sera iniciado:" -ForegroundColor Red
   foreach ($p in $problems) { Write-Host "  - $p" -ForegroundColor Red }
   Write-Host ""
-}
-
-if ($ready.Count -eq 0) {
-  Write-Host "Nenhum servico esta pronto pra subir. Resolva os itens acima e rode de novo." -ForegroundColor Red
   exit 1
 }
 
-# ── Boot ─────────────────────────────────────────────────────────────────────
-$i = 0
-foreach ($svc in $ready) {
-  $i++
-  Write-Host "[$i/$($ready.Count + 1)] Iniciando $($svc.Name)..." -ForegroundColor Yellow
-  Start-Process "node" -ArgumentList $svc.Entry -WorkingDirectory (Join-Path $rootDir $svc.Path) -WindowStyle Normal
-}
+# ── Supervisor ───────────────────────────────────────────────────────────────
+# O processo fica em foreground de proposito: esta janela e o owner do grupo.
+# Fechar com Ctrl+C dispara shutdown dos filhos e impede processos orfaos.
+$supervisor = Join-Path $rootDir "scripts\phase0\supervisor-cli.js"
+$arguments = @(
+  $supervisor,
+  "--root=$rootDir",
+  "--environment=$Environment",
+  "--startup-timeout-ms=$($StartupTimeoutSeconds * 1000)"
+)
+if ($CheckOnly) { $arguments += "--check" }
+if ($NoSkyMP) { $arguments += "--no-skymp" }
 
-Write-Host "[$($ready.Count + 1)/$($ready.Count + 1)] Iniciando Servidor SkyMP..." -ForegroundColor Yellow
-Start-Process "powershell.exe" -ArgumentList "-ExecutionPolicy Bypass -File `"$rootDir\scripts\phase0\Start-Phase0Server.ps1`"" -WorkingDirectory "$rootDir" -WindowStyle Normal
-
-Write-Host ""
-if ($problems.Count -gt 0) {
-  Write-Host "Orquestracao concluida PARCIALMENTE: $($ready.Count) de $($services.Count) servicos subiram." -ForegroundColor Yellow
-} else {
-  Write-Host "Orquestracao concluida: todos os servicos subiram." -ForegroundColor Green
-}
-Write-Host "Para jogar, abra o Launcher na pasta apps\launcher." -ForegroundColor Green
+Write-Host "Preflight aprovado. Entregando processos ao supervisor..." -ForegroundColor Green
+& node @arguments
+exit $LASTEXITCODE

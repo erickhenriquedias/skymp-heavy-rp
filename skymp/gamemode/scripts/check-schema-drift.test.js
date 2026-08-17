@@ -98,6 +98,23 @@ describe('parser, contra as migrations reais do repositório', () => {
     assert.ok(sessions.indices.has('uq_game_session_connection_lease'));
   });
 
+  it('inclui Steam ID secundário único por conta da v20', () => {
+    const identities = esperado.get('steam_identities');
+    assert.ok(identities, 'steam_identities não foi extraída');
+    for (const column of ['steam_id', 'account_id', 'source', 'last_verified_at']) {
+      assert.ok(identities.colunas.has(column), `steam_identities.${column} ausente`);
+    }
+    assert.ok(identities.indices.has('uq_steam_identity_account'));
+  });
+
+  it('MODIFY COLUMN da v14 substitui a nulabilidade inicial do schema', () => {
+    const inventoryLedger = esperado.get('inventory_transactions');
+    assert.deepEqual(inventoryLedger.nulabilidade.get('character_id'), {
+      nullable: true,
+      origem: 'migration-v14-inventory-framework.sql'
+    });
+  });
+
   it('extrai índices adicionados por ALTER TABLE', () => {
     // A v7 é a mais perigosa de faltar: sem ela nada quebra, só fica lento
     // sob carga — que é quando ninguém está olhando o schema.
@@ -216,6 +233,37 @@ describe('comparação', () => {
     assert.equal(r.colunasFaltando.length, 0, 'indice faltando nao pode virar coluna faltando');
     assert.equal(r.indicesFaltando.length, 1);
     assert.equal(r.indicesFaltando[0].indice, 'idx_char');
+  });
+
+  it('detecta coluna presente com nulabilidade de migration não aplicada', () => {
+    const esperado = new Map([
+      ['inventory_transactions', {
+        colunas: new Set(['character_id']),
+        indices: new Set(),
+        nulabilidade: new Map([[
+          'character_id',
+          { nullable: true, origem: 'migration-v14-inventory-framework.sql' }
+        ]]),
+        origem: 'schema.sql'
+      }]
+    ]);
+    const real = new Map([
+      ['inventory_transactions', {
+        colunas: new Set(['character_id']),
+        indices: new Set(),
+        nulabilidade: new Map([['character_id', false]])
+      }]
+    ]);
+
+    const r = drift.compararSchemas(esperado, real);
+    assert.equal(drift.houveFalta(r), true);
+    assert.deepEqual(r.nulabilidadeDivergente, [{
+      tabela: 'inventory_transactions',
+      coluna: 'character_id',
+      esperado: 'NULL',
+      atual: 'NOT NULL',
+      origem: 'migration-v14-inventory-framework.sql'
+    }]);
   });
 
   it('tabela criada à mão aparece como extra, sem virar falta', () => {

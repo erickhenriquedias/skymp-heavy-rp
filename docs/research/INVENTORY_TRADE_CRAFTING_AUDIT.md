@@ -2,6 +2,11 @@
 
 **Data:** 13/08/2026 · **Escopo:** PROMPT 3 · **Estado do servidor:** nada disto rodou numa sessão real.
 
+> **Atualização de 16/08/2026:** os achados desta auditoria permanecem como
+> registro do estado encontrado. A fonte de verdade foi consolidada pelo
+> `core/inventory.js`; barracas ganharam testes de atomicidade/rollback, e o
+> drift checker agora reconhece a nulabilidade alterada por `MODIFY COLUMN`.
+
 Esta auditoria precede qualquer mudança de código, pela mesma regra que a
 [`CORE_FRAMEWORK_AUDIT.md`](CORE_FRAMEWORK_AUDIT.md) seguiu: o que for corrigido
 depois tem que apontar para um parágrafo daqui.
@@ -415,16 +420,10 @@ A matriz completa, com o estado **depois**, está em
 
 ## 15. Migrations: estado
 
-`schema.sql` + `migration-v2` … `migration-v13`, aplicadas **à mão** e conferidas
-por `scripts/check-schema-drift.js` (que lê os `.sql` como fonte da verdade e
-compara com `information_schema`).
-
-Nada relacionado a inventário mudou desde a `v13` (idempotência de compra em
-barraca). O `check-schema-drift` reconhece `CREATE TABLE`, `ALTER TABLE ADD
-COLUMN/INDEX` e `CREATE INDEX` — as três formas que a migração desta rodada usa,
-então ela entra na conferência automaticamente. `MODIFY COLUMN` **não** é
-reconhecido: uma mudança de nulabilidade não aparece como drift, e isso está
-anotado na própria migração.
+O runner aplica `schema.sql` + migrations versionadas sob lock e ledger de
+checksum. `check-schema-drift.js` faz a verificação independente contra
+`information_schema`: tabelas, colunas, índices e, desde 16/08/2026,
+nulabilidade final de `CREATE`, `ADD` e `MODIFY COLUMN`.
 
 ---
 

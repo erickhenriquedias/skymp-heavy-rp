@@ -154,6 +154,19 @@ describe('death-events — o hook tem dono unico e varios assinantes', () => {
     assert.deepStrictEqual(rodou, ['permanente']);
   });
 
+  it('ultimo unsubscribe remove o hook e um novo subscribe reinstala uma unica funcao', () => {
+    deathEvents.subscribe('reloadavel', () => {});
+    const primeiroHook = global.mp.onDeath;
+    assert.equal(typeof primeiroHook, 'function');
+
+    deathEvents.unsubscribe('reloadavel');
+    assert.equal(global.mp.onDeath, undefined);
+
+    deathEvents.subscribe('reloadavel', () => {});
+    assert.equal(typeof global.mp.onDeath, 'function');
+    assert.notEqual(global.mp.onDeath, primeiroHook);
+  });
+
   it('subscribe recusa nome vazio e handler que nao e funcao', () => {
     assert.throws(() => deathEvents.subscribe('', () => {}), /nome nao-vazio/);
     assert.throws(() => deathEvents.subscribe('   ', () => {}), /nome nao-vazio/);

@@ -151,6 +151,8 @@ Precisa existir um canal de contato **nomeado para autores de mod**. O [`SECURIT
 ## 7. O que esta política não faz
 
 - **Não classifica os mods de `MODPACK.md`.** A tabela lá lista arquivos e links, sem coluna de permissão. Preencher categoria por categoria é trabalho de curadoria e exige abrir a aba "Permissions and credits" de cada mod, um por um.
-- **Não implementa nada.** O campo `distribution` não existe no `mods.json` de hoje (`manifestVersion` também não — ver `PLAT-06` na auditoria).
+- **Não classifica licenças automaticamente.** O manifesto v2 e o
+  `distribution-map.json` estão implementados, mas decidir quais arquivos podem
+  receber `downloadUrl` continua sendo responsabilidade humana de curadoria.
 - **Não substitui aconselhamento jurídico.** É uma política operacional escrita por quem desenvolve, alinhada ao que os termos do Nexus e as permissões de autor declaram.
 - **Não decide sobre Creation Club.** `MOD-005` continua aberta.

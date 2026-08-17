@@ -183,21 +183,20 @@ function sweepOnce(policy = loadPolicy()) {
   return relatorio;
 }
 
-function startWorldCleaner() {
-  if (typeof mp === 'undefined') return;
-
-  const policy = loadPolicy();
+function startWorldCleaner(policy = loadPolicy()) {
+  if (typeof mp === 'undefined') return false;
+  if (_sweepTimer) return false;
 
   if (!policy.enabled) {
     console.log('[npc-cleaner] Desligado (npc-policy.json ausente ou enabled=false). Nenhum NPC sera tocado.');
-    return;
+    return false;
   }
   if (policy.blockedBaseDescs.size === 0) {
     console.warn(
       '[npc-cleaner] enabled=true, mas blockedBaseDescs esta vazia — nenhum NPC sera removido. ' +
       'Isto e deliberado: a lista e de BLOQUEIO. Preencha depois da curadoria da secao 4 de NPC_POLICY_DECISION.md.'
     );
-    return;
+    return false;
   }
 
   console.log(
@@ -220,16 +219,24 @@ function startWorldCleaner() {
   }, policy.sweepIntervalMs);
 
   if (typeof _sweepTimer.unref === 'function') _sweepTimer.unref();
+  return true;
 }
 
 function stopWorldCleaner() {
-  if (_sweepTimer) clearInterval(_sweepTimer);
+  if (!_sweepTimer) return false;
+  clearInterval(_sweepTimer);
   _sweepTimer = null;
+  return true;
+}
+
+function isWorldCleanerRunning() {
+  return Boolean(_sweepTimer);
 }
 
 module.exports = {
   startWorldCleaner,
   stopWorldCleaner,
+  isWorldCleanerRunning,
   loadPolicy,
   sweepOnce,
   // Exposto pra teste: a regra de remocao permanente merece teste direto.

@@ -101,6 +101,7 @@
 const _subscribers = new Map();
 
 let _hookInstalled = false;
+let _hook = null;
 
 /**
  * Entrega o evento a cada assinante, isolando falhas, e agrega o retorno.
@@ -161,7 +162,8 @@ function _installHook() {
     );
   }
 
-  mp.onDeath = (actorId, killerId) => _dispatch(actorId, killerId);
+  _hook = (actorId, killerId) => _dispatch(actorId, killerId);
+  mp.onDeath = _hook;
   _hookInstalled = true;
 }
 
@@ -202,7 +204,13 @@ function subscribe(name, handler) {
  * @returns {boolean} se havia algo para remover
  */
 function unsubscribe(name) {
-  return _subscribers.delete(name);
+  const removed = _subscribers.delete(name);
+  if (_subscribers.size === 0 && _hookInstalled) {
+    if (typeof mp !== 'undefined' && mp.onDeath === _hook) delete mp.onDeath;
+    _hook = null;
+    _hookInstalled = false;
+  }
+  return removed;
 }
 
 /** Quem está escutando agora. Para diagnóstico e teste. */
@@ -222,7 +230,8 @@ function subscriberNames() {
 function _resetForTest() {
   _subscribers.clear();
   _hookInstalled = false;
-  if (typeof mp !== 'undefined') delete mp.onDeath;
+  if (typeof mp !== 'undefined' && mp.onDeath === _hook) delete mp.onDeath;
+  _hook = null;
 }
 
 module.exports = {

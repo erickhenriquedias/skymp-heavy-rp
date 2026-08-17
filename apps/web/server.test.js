@@ -48,7 +48,8 @@ const {
   app,
   validateApplication,
   hashTicket,
-  setSessionOccupancyNotifierForTests
+  setSessionOccupancyNotifierForTests,
+  setPanelReadinessProbeForTests
 } = require(path.join(__dirname, 'server.js'));
 
 Module._load = realLoad;
@@ -72,6 +73,7 @@ beforeEach(() => {
   queryLog.length = 0;
   queryHandler = () => [];
   setSessionOccupancyNotifierForTests(async () => ({ ok: true, marked: true }));
+  setPanelReadinessProbeForTests(async () => true);
 });
 
 const get = (p, opts) => fetch(`${baseUrl}${p}`, { redirect: 'manual', ...opts });
@@ -80,6 +82,22 @@ const post = (p, body) => fetch(`${baseUrl}${p}`, {
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify(body),
   redirect: 'manual'
+});
+
+describe('health operacional', () => {
+  test('/health prova somente liveness', async () => {
+    setPanelReadinessProbeForTests(async () => { throw new Error('nao deveria consultar'); });
+    const res = await get('/health');
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { ok: true });
+  });
+
+  test('/ready reprova sem vazar erro do MariaDB', async () => {
+    setPanelReadinessProbeForTests(async () => { throw new Error('senha=segredo host=interno'); });
+    const res = await get('/ready');
+    assert.equal(res.status, 503);
+    assert.deepEqual(await res.json(), { ready: false, checks: { database: false } });
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

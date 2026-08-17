@@ -62,19 +62,33 @@ Espere `[OK] banco e migrations estao alinhados`. Se faltar tabela ou coluna, **
 ls apps/game-api/mods.json
 ```
 
-Tem de existir e conter `mods` e `loadOrder`. **Sem ele, `/mods.json` responde 503 e ninguém entra** — nem você. Se faltar:
+Tem de ser um envelope Ed25519 válido com payload v2 contendo `files` e
+`loadOrder`. **Sem ele, `/mods.json` responde 503 e ninguém entra** — nem você.
+Se faltar, use a chave de teste isolada:
 
 ```bash
-cd apps/game-api && node scripts/generate-mods-manifest.js "<pasta Data do servidor>" --plugins-txt "<plugins.txt>"
+$env:UPDATE_SIGNING_PRIVATE_KEY = '<PKCS8_DER_BASE64>'
+cd apps/game-api
+node scripts/generate-mods-manifest.js "<Data>" --plugins-txt "<plugins.txt>" --channel development --build "phase0" --sequence 1 --key-id "phase0"
+Remove-Item Env:UPDATE_SIGNING_PRIVATE_KEY
 ```
 
-O `--plugins-txt` importa: sem ele o script infere a load order pela ordem alfabética do diretório, que **não** é a load order real do Skyrim.
+Configure a chave pública correspondente em `MODS_MANIFEST_PUBLIC_KEYS` tanto
+na game-api quanto em `skymp/gamemode/.env`; neste último, configure também
+`PARITY_MANIFEST_PATH=../../apps/game-api/mods.json`. O gerador não aceita
+fallback alfabético: `--plugins-txt` é obrigatório. No boot, o gamemode compara
+manifesto, `server-settings.loadOrder` e `mp.getEspmLoadOrder()` antes do banco.
+No `.env` do launcher usado nessa bancada, configure também
+`VITE_CLIENT_UPDATE_CHANNEL=development` e
+`VITE_MODS_UPDATE_CHANNEL=development` antes do build/dev.
 
 ## 1.2 Configuração
 
 **Flags no `skymp/gamemode/.env`:**
 
 ```
+PARITY_MANIFEST_PATH=../../apps/game-api/mods.json
+MODS_MANIFEST_PUBLIC_KEYS={"phase0":"<SPKI_PUBLICA_BASE64>"}
 ENABLE_GOVERNANCE_SERVICE=true
 ENABLE_MARKET_STALLS_SERVICE=true
 ENABLE_DEATH_SERVICE=true

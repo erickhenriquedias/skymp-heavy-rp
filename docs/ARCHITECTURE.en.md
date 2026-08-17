@@ -58,7 +58,7 @@ Built with **discord.js**.
 
 ### 1.3.1 Game API (`apps/game-api`)
 Express, port `GAME_API_PORT` (7758) — the port the launcher always called and for which no server existed. Details in `docs/technical/LAUNCHER_DISTRIBUTION.md`.
-- **`GET /mods.json`**: modpack parity manifest (`{mods, loadOrder}`), generated offline by `scripts/generate-mods-manifest.js` from a reference `Data/` folder. A missing or corrupt manifest answers **503**, never an empty list — an empty list would pass the launcher's verification and let any modpack in.
+- **`GET /mods.json`**: signed Ed25519 v2 parity envelope (`{files, loadOrder}` in its payload), generated offline by `scripts/generate-mods-manifest.js` from a reference `Data/` folder. Missing, expired, tampered, incompatible, or empty manifests return **503**.
 - **Queue** (`POST /api/queue/join`, `POST /api/queue/status`): fixed capacity, FIFO, with reservation expiry so that someone who closes the launcher after being admitted doesn't hold the slot forever. Authenticated by a single-use ticket issued by the panel (`launch_tickets`, migration v6) — `discordId` is public and is not proof of identity.
 - **Game session**: on admitting someone, it writes a row in `game_sessions` (migration v8) and returns the token to the launcher, which writes it as `session` in `skymp_config.json`. That token is what the SkyMP server resolves against the master API (see 1.2.1) — that's how identity stops being a client declaration.
 - **`POST /internal/session/resolve` / `/release`** (`X-Internal-Secret`): slot release on disconnect. `resolve` became redundant once the native session path existed — kept only while in-game testing hasn't confirmed the master API flow.

@@ -92,6 +92,25 @@ const _lastHealth = new Map();
 // characterId -> quem o derrubou, capturado por `mp.onDeath` no instante da
 // queda. Precisa sobreviver até o bleed-out, que acontece minutos depois.
 const _killers = new Map();
+let _healthPollTimer = null;
+let _initialized = false;
+const _deferredTimers = new Set();
+
+function scheduleDeferred(callback, delayMs) {
+  const timer = setTimeout(() => {
+    _deferredTimers.delete(timer);
+    callback();
+  }, delayMs);
+  _deferredTimers.add(timer);
+  if (typeof timer.unref === 'function') timer.unref();
+  return timer;
+}
+
+function cancelDeferred(timer) {
+  if (!timer) return;
+  clearTimeout(timer);
+  _deferredTimers.delete(timer);
+}
 
 /**
  * Grava um episódio de agressão relatado pelo cliente.
@@ -137,6 +156,8 @@ async function logCombatEpisode(episodio) {
 
 function initDeathService() {
   if (typeof mp === 'undefined') return;
+  if (_initialized) return;
+  _initialized = true;
   console.log('[death-service] Initializing Death and Respawn hooks...');
 
   // Agressão relatada pelo cliente. Substitui, quando confirmado in-game, a
@@ -233,7 +254,7 @@ function initDeathService() {
   // `checkDamageSpike` — ou sair de vez, se o evento de hit por
   // `makeEventSource` substituir a heurística. Ver
   // docs/technical/SKYMP_UPSTREAM_REFERENCE.md 2.5.
-  setInterval(() => {
+  _healthPollTimer = setInterval(() => {
     try {
       // Para cada profileId de player 1..50
       for (let pId = 1; pId <= 50; pId++) {
@@ -259,6 +280,21 @@ function initDeathService() {
       console.error('[death-service] Error polling health:', err.message);
     }
   }, 2000);
+  if (typeof _healthPollTimer.unref === 'function') _healthPollTimer.unref();
+}
+
+function shutdownDeathService() {
+  if (_healthPollTimer) clearInterval(_healthPollTimer);
+  _healthPollTimer = null;
+  deathEvents.unsubscribe('death-service');
+  hitEvents.stop();
+
+  for (const downed of _downedPlayers.values()) cancelDeferred(downed.timer);
+  for (const timer of [..._deferredTimers]) cancelDeferred(timer);
+  _downedPlayers.clear();
+  _lastHealth.clear();
+  _killers.clear();
+  _initialized = false;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -286,11 +322,9 @@ async function handlePlayerDowned(actorId, killerId) {
   // mesmo minutos depois — a informação vem do hook e não se recupera sozinha.
   await logKiller(actorId, character.characterId, killerId);
 
-  const timer = setTimeout(() => {
+  const timer = scheduleDeferred(() => {
     bleedOut(actorId, character.characterId).catch(err => console.error('[death-service] Falha no bleed-out:', err.message));
   }, BLEED_OUT_MS);
-  // unref: um bleed-out pendente não deve impedir o processo (ou os testes) de encerrar.
-  if (typeof timer.unref === 'function') timer.unref();
 
   _downedPlayers.set(character.characterId, { actorId, downedAt: Date.now(), timer });
 }
@@ -329,7 +363,7 @@ async function rescueTarget(rescuerActorId, targetActorId) {
     return;
   }
 
-  clearTimeout(downed.timer);
+  cancelDeferred(downed.timer);
   _downedPlayers.delete(target.characterId);
   // Socorrido a tempo: não houve morte, então a autoria deixa de ser relevante
   // (e o registro em audit_logs já guarda o que aconteceu, se a staff precisar).
@@ -383,10 +417,9 @@ async function bleedOut(actorId, characterId) {
     return penalty;
   }
 
-  const respawnTimer = setTimeout(() => {
+  scheduleDeferred(() => {
     executeRespawn(actorId, characterId, penalty).catch(err => console.error('[death-service] Falha no respawn:', err.message));
   }, RESPAWN_DELAY_MS);
-  if (typeof respawnTimer.unref === 'function') respawnTimer.unref();
 
   return penalty;
 }
@@ -415,12 +448,11 @@ async function retireOnPermadeath(actorId, characterId) {
     // Kick com folga pra mensagem ser lida. `whitelist.js` só libera spawn com
     // `status='approved'`, então uma reconexão já não encontra este personagem.
     if (typeof mp !== 'undefined') {
-      const kickTimer = setTimeout(() => {
+      scheduleDeferred(() => {
         // `mp.kick` recebe `userId`, nao FormID; o adaptador converte pelo
         // `getUserByActor`. Ver docs/research/SKYMP_INTEGRATION_AUDIT.md §6.
         try { skymp.kick(actorId); } catch (err) { console.error('[death-service] Falha ao kickar apos permadeath:', err.message); }
       }, 8000);
-      if (typeof kickTimer.unref === 'function') kickTimer.unref();
     }
   } catch (err) {
     console.error('[death-service] Falha ao aposentar personagem por permadeath:', err.message);
@@ -681,6 +713,7 @@ function commandDefs() {
 module.exports = {
   commandDefs,
   initDeathService,
+  shutdownDeathService,
   rescueTarget,
   bleedOut,
   executeRespawn,

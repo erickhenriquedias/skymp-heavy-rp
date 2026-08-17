@@ -318,6 +318,17 @@ async function bootAll() {
       // interações. Deixá-las no registro é pior que a falha em si: elas
       // aparecem no menu e executam contra um serviço que nunca inicializou.
       const orfas = interactionRegistry.unregisterModule(id);
+      // `initialize` pode ter aberto timer/socket antes de falhar. Mesmo sem o
+      // modulo ter chegado a `_active`, seu shutdown precisa ter a chance de
+      // desfazer o boot parcial.
+      try {
+        await mod.shutdown();
+      } catch (shutdownError) {
+        console.error(
+          `[module-registry] ${id}: falha ao limpar initialize parcial:`,
+          shutdownError.message
+        );
+      }
       console.error(
         `[module-registry] ${id}: FALHOU ao inicializar:`, err.message +
         (orfas > 0 ? ` (${orfas} interações órfãs removidas)` : '')
@@ -333,6 +344,21 @@ async function bootAll() {
   }
 
   return results;
+}
+
+/**
+ * Remove descritores de uma instancia ja encerrada antes do proximo boot.
+ * Diferente de `_reset`, esta funcao e API de producao e recusa apagar modulo
+ * ativo: o coordenador de runtime deve aguardar `shutdownAll()` primeiro.
+ */
+function prepareForBoot() {
+  if (_active.size > 0) {
+    throw new Error(
+      `[module-registry] reload recusado: ${_active.size} modulo(s) ainda ativo(s)`
+    );
+  }
+  _modules.clear();
+  _states.clear();
 }
 
 /**
@@ -447,6 +473,6 @@ module.exports = {
   STATES,
   register, isEnabled, getState,
   bootAll, shutdownAll, healthCheckAll, assertCoreReady, list,
-  topologicalOrder,
+  topologicalOrder, prepareForBoot,
   _reset
 };

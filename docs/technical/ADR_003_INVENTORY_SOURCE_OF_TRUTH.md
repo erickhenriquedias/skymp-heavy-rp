@@ -188,9 +188,9 @@ diferentes.
 - O razão cresceu: duas linhas por item movido em vez de uma. Para um servidor
   de Heavy RP isso é barato; para um de 500 jogadores fazendo craft em massa,
   seria a primeira coisa a medir.
-- `migration-v14` altera nulabilidade de `character_id`, e
-  `check-schema-drift.js` **não reconhece `MODIFY COLUMN`** — um banco que pulou
-  esta migração não aparece como divergente. Está anotado na própria migração.
+- `migration-v14` altera nulabilidade de `character_id`. Desde 16/08/2026,
+  `check-schema-drift.js` reconhece `MODIFY COLUMN` e compara `IS_NULLABLE`; o
+  custo restante é executar o check contra o MariaDB real de cada ambiente.
 
 ### Riscos aceitos
 
@@ -201,7 +201,7 @@ diferentes.
 - **Capacidade e peso não existem.** O contrato do adaptador tem o lugar
   (`capacity`), nenhum adaptador o implementa, e nenhuma coluna o suporta.
   Declarado ausente, não simulado.
-- **Nada disto rodou numa sessão real.** 716 testes verdes e zero jogadores — a
+- **Nada disto rodou numa sessão real.** 895 testes principais e zero jogadores — a
   mesma frase que o `ADR_002` e o `INTERACTION_FRAMEWORK.md` carregam, pela
   mesma razão.
 

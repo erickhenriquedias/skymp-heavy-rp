@@ -113,6 +113,7 @@ global.mp = {
     mpState.values.set(`${actorId}:${prop}`, value);
   },
   getDescFromId: (actorId) => `desc-${actorId}`,
+  getActorsByProfileId: () => [],
   callPapyrusFunction: () => null
 };
 
@@ -129,10 +130,12 @@ const commands = require('./commands');
 const characterState = require('./core/character-state');
 const { STATES } = characterState;
 const deathService = require('./death-service');
+const deathEvents = require('./core/death-events');
 
 Module._load = originalLoad;
 
 after(() => {
+  deathService.shutdownDeathService();
   delete global.mp;
 });
 
@@ -144,6 +147,37 @@ const VICTIM_ACTOR_ID = 0xff00d001;
 const VICTIM_CHARACTER_ID = 8001;
 const RESCUER_ACTOR_ID = 0xff00d002;
 const RESCUER_CHARACTER_ID = 8002;
+
+describe('death-service — lifecycle', () => {
+  it('shutdown remove assinatura, estado e permite reinicializar sem duplicar recursos', async () => {
+    deathService.shutdownDeathService();
+    deathService.initDeathService();
+    assert.ok(deathEvents.subscriberNames().includes('death-service'));
+
+    commands.registerActiveCharacter(
+      VICTIM_ACTOR_ID,
+      { id: VICTIM_CHARACTER_ID, first_name: 'Vitima', last_name: 'Um' },
+      1,
+      1
+    );
+    characterState.set(VICTIM_CHARACTER_ID, STATES.NORMAL, {});
+    await deathService._handlePlayerDowned(VICTIM_ACTOR_ID);
+    assert.strictEqual(deathService._downedPlayers.size, 1);
+
+    deathService.shutdownDeathService();
+    assert.ok(!deathEvents.subscriberNames().includes('death-service'));
+    assert.strictEqual(deathService._downedPlayers.size, 0);
+    assert.strictEqual(deathService._lastHealth.size, 0);
+    assert.strictEqual(deathService._killers.size, 0);
+
+    deathService.initDeathService();
+    assert.deepStrictEqual(
+      deathEvents.subscriberNames().filter(name => name === 'death-service'),
+      ['death-service']
+    );
+    deathService.shutdownDeathService();
+  });
+});
 
 describe('death-service', () => {
   beforeEach(() => {

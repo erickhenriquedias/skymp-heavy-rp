@@ -269,6 +269,36 @@ describe('module-registry — ciclo de vida', () => {
     assert.deepEqual(ordem, ['cima', 'base'], 'quem depende desliga antes de quem é dependido');
   });
 
+  it('limpa initialize parcial chamando shutdown mesmo sem chegar a RUNNING', async () => {
+    let resourceOpen = false;
+    moduleRegistry.register(modulo('parcial', {
+      initialize: async () => {
+        resourceOpen = true;
+        throw new Error('falhou depois de abrir recurso');
+      },
+      shutdown: async () => { resourceOpen = false; }
+    }));
+    ligar('TEST_ENABLE_PARCIAL');
+
+    const result = await semLog(() => moduleRegistry.bootAll());
+    assert.equal(result.failed[0].id, 'parcial');
+    assert.equal(resourceOpen, false, 'timer/socket aberto antes da falha precisa ser fechado');
+  });
+
+  it('prepareForBoot recusa modulo ativo e limpa descritores depois do shutdown', async () => {
+    moduleRegistry.register(modulo('reloadavel'));
+    ligar('TEST_ENABLE_RELOADAVEL');
+    await semLog(() => moduleRegistry.bootAll());
+
+    assert.throws(() => moduleRegistry.prepareForBoot(), /ainda ativo/);
+    await semLog(() => moduleRegistry.shutdownAll());
+    moduleRegistry.prepareForBoot();
+    assert.deepEqual(moduleRegistry.list(), []);
+
+    assert.doesNotThrow(() => moduleRegistry.register(modulo('reloadavel')),
+      'o proximo entrypoint deve registrar os mesmos ids sem colisao de cache');
+  });
+
   it('recusa o mesmo id registrado duas vezes', () => {
     moduleRegistry.register(modulo('unico'));
     assert.throws(() => moduleRegistry.register(modulo('unico')), /registrado duas vezes/);

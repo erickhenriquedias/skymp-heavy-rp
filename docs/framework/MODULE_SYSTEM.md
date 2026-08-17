@@ -107,6 +107,15 @@ O shutdown inverso importa: sem ele, `governance` poderia sair enquanto `market-
 
 Erro no `shutdown` de um módulo não impede o desligamento dos demais, e o módulo que falhou ao desligar **não continua "ativo"**.
 
+Em 16/08/2026, os ciclos isolados de `death`, `npc-cleaner` e `voip` passaram a
+ter testes de stop/restart: timers e estado do serviço de morte são cancelados,
+o cleaner não abre dois intervalos, e o WebSocket de voz libera a porta para
+bind imediato. Isso valida os recursos próprios desses módulos; não comprova o
+hot reload completo do SkyMP, que ainda depende de sessão real e da observação
+de hooks/listeners mantidos pela engine. A barreira entre instâncias e o
+protocolo operacional estão em
+[`HOT_RELOAD_LIFECYCLE.md`](../technical/HOT_RELOAD_LIFECYCLE.md).
+
 ---
 
 ## 5. As três fases

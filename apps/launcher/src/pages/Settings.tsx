@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, Bug, Download, FolderOpen, Search, Wrench } from 'lucide-react';
+import { ArrowLeft, Bug, Download, FolderOpen, RotateCcw, Search, Wrench } from 'lucide-react';
 
 export function Settings() {
   const navigate = useNavigate();
@@ -43,7 +43,7 @@ export function Settings() {
         setGamePath(selected);
         setSuccess('Pasta validada e salva com sucesso.');
       } else {
-        setError(`Pasta invalida: ${valid.reason}`);
+        setError(valid.message || `Pasta inválida: ${valid.reason}`);
       }
     } catch (e: any) {
       setError(e.message || 'Erro ao selecionar pasta.');
@@ -135,6 +135,21 @@ export function Settings() {
     }
   };
 
+  const handleRollback = async () => {
+    if (!requirePath()) return;
+    if (!confirm('Restaurar os arquivos anteriores a ultima atualizacao? O jogo deve estar fechado.')) return;
+    setBusy('rollback-update');
+    try {
+      const result = await window.electronAPI.rollbackLastUpdate(gamePath);
+      if (result.success) setSuccess('Ultima atualizacao revertida. Verifique os mods antes de jogar.');
+      else setError(result.error || 'Falha ao reverter a ultima atualizacao.');
+    } catch (e: any) {
+      setError(e.message || 'Falha ao reverter a ultima atualizacao.');
+    } finally {
+      setBusy('');
+    }
+  };
+
   const handleReportCrashes = async () => {
     resetMessages();
     setBusy('crash-report');
@@ -209,6 +224,9 @@ export function Settings() {
           </button>
           <button className="btn-secondary" onClick={handleInstallMods} disabled={!!busy}>
             <Download size={18} /> Atualizar Mods
+          </button>
+          <button className="btn-secondary" onClick={handleRollback} disabled={!!busy}>
+            <RotateCcw size={18} /> Desfazer Update
           </button>
           <button className="btn-secondary" onClick={handleReportCrashes} disabled={!!busy}>
             <Bug size={18} /> Enviar Crash

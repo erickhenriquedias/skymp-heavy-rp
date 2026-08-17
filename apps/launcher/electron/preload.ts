@@ -13,8 +13,8 @@ const api = {
   discordLogout: () => ipcRenderer.invoke('discord-logout'),
   getAuthStatus: () => ipcRenderer.invoke('get-auth-status'),
   getServerStatus: () => ipcRenderer.invoke('get-server-status'),
-  joinQueue: () => ipcRenderer.invoke('join-queue'),
-  pollQueue: () => ipcRenderer.invoke('poll-queue'),
+  joinQueue: (preparationToken: string, folderPath: string) => ipcRenderer.invoke('join-queue', preparationToken, folderPath),
+  pollQueue: (preparationToken: string, folderPath: string) => ipcRenderer.invoke('poll-queue', preparationToken, folderPath),
   getLocalPlugins: (folderPath: string) => ipcRenderer.invoke('get-local-plugins', folderPath),
   verifyMods: (folderPath: string) => ipcRenderer.invoke('verify-mods', folderPath),
   analyzePlugins: (folderPath: string, serverLoadOrder?: string[]) => ipcRenderer.invoke('analyze-plugins', folderPath, serverLoadOrder),
@@ -25,6 +25,10 @@ const api = {
   installClientUpdate: (folderPath: string) => ipcRenderer.invoke('install-client-update', folderPath),
   checkModsUpdate: (folderPath: string) => ipcRenderer.invoke('check-mods-update', folderPath),
   installModsUpdate: (folderPath: string, force?: boolean) => ipcRenderer.invoke('install-mods-update', folderPath, force),
+  repairModsIncremental: (folderPath: string, confirmed?: boolean) => ipcRenderer.invoke('repair-mods-incremental', folderPath, confirmed),
+  cancelUpdateOperation: () => ipcRenderer.invoke('cancel-update-operation'),
+  prepareToPlay: (folderPath: string) => ipcRenderer.invoke('prepare-to-play', folderPath),
+  rollbackLastUpdate: (folderPath: string) => ipcRenderer.invoke('rollback-last-update', folderPath),
   getRecentCrashes: () => ipcRenderer.invoke('get-recent-crashes'),
   reportRecentCrashes: () => ipcRenderer.invoke('report-recent-crashes'),
   onUpdateProgress: (callback: (value: any) => void) => {
@@ -35,7 +39,7 @@ const api = {
     ipcRenderer.removeAllListeners('mods-update-progress');
     ipcRenderer.on('mods-update-progress', (_event, value) => callback(value));
   },
-  launchGame: (folderPath: string, ticket: string) => ipcRenderer.invoke('launch-game', folderPath, ticket)
+  launchGame: (folderPath: string, ticket: string, preparationToken: string) => ipcRenderer.invoke('launch-game', folderPath, ticket, preparationToken)
 };
 
 contextBridge.exposeInMainWorld('electronAPI', api);

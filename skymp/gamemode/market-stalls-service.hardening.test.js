@@ -7,10 +7,9 @@
  * duas chamadas concorrentes (ex: /stallremove + /stallpack) lessem o mesmo
  * status='listed' e ambas devolvessem o item, duplicando-o.
  *
- * Não simula a concorrência real (isso exigiria MariaDB de verdade — ver
- * verificação manual documentada no README); em vez disso trava a regressão
- * de "o código agora pede o lock dentro de uma transação", que é a mudança
- * estrutural que fecha a janela de corrida.
+ * Também trava a fronteira de atomicidade com o inventário: mudança da pilha,
+ * ledger e anúncio precisam usar a MESMA conexão antes do commit. Um erro no
+ * anúncio deve pedir rollback, sem projetar o item no cliente.
  *
  * Executa com: node --test market-stalls-service.hardening.test.js
  */
@@ -25,6 +24,7 @@ const ITEM_ID = 123;
 
 const connEvents = []; // { op: 'begin'|'commit'|'rollback', queries: [...] }
 let currentConnQueries = null;
+let failQueryPattern = null;
 
 function makeConn() {
   currentConnQueries = [];
@@ -36,6 +36,7 @@ function makeConn() {
     release: () => {},
     query: async (sql, params = []) => {
       queries.push(sql);
+      if (failQueryPattern?.test(sql)) throw new Error('falha SQL forçada');
 
       if (/FROM market_stall_items msi[\s\S]*INNER JOIN market_stalls/i.test(sql) && /FOR UPDATE/i.test(sql)) {
         return [[{
@@ -52,7 +53,7 @@ function makeConn() {
       }
       if (/UPDATE market_stalls SET status/i.test(sql)) return [[{}]];
       // Caminho generico usado pelo inventory-service/transaction-service (giveItem)
-      if (/SELECT count FROM character_inventory/i.test(sql)) return [[]];
+      if (/SELECT count FROM character_inventory/i.test(sql)) return [[{ count: 10 }]];
       return [[]];
     }
   };
@@ -101,6 +102,14 @@ describe('market-stalls-service — hardening (lock antes de remover/recolher)',
       commitEvent.queries.some(q => /UPDATE market_stall_items SET status/i.test(q)),
       'removeItem deveria marcar o item como removido dentro da mesma transação'
     );
+    assert.ok(
+      commitEvent.queries.some(q => /character_inventory/i.test(q)),
+      'a devolução ao inventário deveria usar a mesma conexão antes do commit'
+    );
+    assert.ok(
+      commitEvent.queries.some(q => /INSERT INTO inventory_transactions/i.test(q)),
+      'o ledger da devolução deveria estar na mesma transação'
+    );
   });
 
   it('packStall abre transação e trava a barraca + os itens com FOR UPDATE', async () => {
@@ -114,6 +123,40 @@ describe('market-stalls-service — hardening (lock antes de remover/recolher)',
     assert.ok(
       commitEvent.queries.some(q => /UPDATE market_stalls SET status/i.test(q)),
       'packStall deveria marcar a barraca como recolhida na mesma transação'
+    );
+    assert.ok(
+      commitEvent.queries.some(q => /character_inventory/i.test(q)),
+      'packStall deveria devolver o estoque na mesma transação'
+    );
+    assert.ok(
+      commitEvent.queries.some(q => /INSERT INTO inventory_transactions/i.test(q)),
+      'packStall deveria registrar o ledger antes do commit'
+    );
+  });
+
+  it('addItem reverte a remoção do inventário se o anúncio falhar', async () => {
+    connEvents.length = 0;
+    failQueryPattern = /INSERT INTO market_stall_items/i;
+    try {
+      await marketStalls.addItem(OWNER_ACTOR_ID, STALL_ID, '0x1234', 3, 25, 'Item de teste');
+    } finally {
+      failQueryPattern = null;
+    }
+
+    assert.equal(connEvents.some(e => e.op === 'commit'), false);
+    const rollbackEvent = connEvents.find(e => e.op === 'rollback');
+    assert.ok(rollbackEvent, 'falha no anúncio deveria reverter toda a transação');
+    assert.ok(
+      rollbackEvent.queries.some(q => /character_inventory/i.test(q)),
+      'a remoção da pilha precisa estar dentro da transação revertida'
+    );
+    assert.ok(
+      rollbackEvent.queries.some(q => /INSERT INTO inventory_transactions/i.test(q)),
+      'o ledger precisa estar dentro da transação revertida'
+    );
+    assert.ok(
+      rollbackEvent.queries.some(q => /INSERT INTO market_stall_items/i.test(q)),
+      'a falha forçada deve ocorrer depois da remoção e do ledger'
     );
   });
 });

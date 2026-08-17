@@ -3,7 +3,6 @@
 ## Informacoes do Jogador
 
 - Discord ID:
-- Steam ID:
 - Fuso horario:
 - Idioma preferido:
 - Confirmacao de idade:

@@ -206,4 +206,20 @@ describe('hit-events — start sem servidor não quebra', () => {
 
     assert.strictEqual(ok, false, 'sem makeEventSource nao ha o que registrar');
   });
+
+  it('stop remove somente o handler que o modulo instalou', () => {
+    const originalMp = global.mp;
+    global.mp = { makeEventSource: () => {} };
+    try {
+      assert.equal(hitEvents.start(() => {}), true);
+      const handler = global.mp[hitEvents.NOME_DO_EVENTO];
+      assert.equal(typeof handler, 'function');
+      hitEvents.stop();
+      assert.equal(global.mp[hitEvents.NOME_DO_EVENTO], undefined);
+    } finally {
+      hitEvents.stop();
+      if (originalMp === undefined) delete global.mp;
+      else global.mp = originalMp;
+    }
+  });
 });

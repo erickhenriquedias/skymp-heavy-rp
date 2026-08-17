@@ -24,6 +24,7 @@
  *
  *   - tabela declarada e ausente no banco  → migration não aplicada
  *   - coluna declarada e ausente no banco  → migration parcialmente aplicada
+ *   - nulabilidade diferente da declarada  → migration com MODIFY parcial
  *   - índice declarado e ausente no banco  → v7 não aplicada (silencioso: só
  *                                            aparece como lentidão sob carga)
  *   - tabela no banco que nenhuma migration cria → alteração feita à mão
@@ -165,14 +166,27 @@ function instrucoesSql(sql) {
  * se o que ele entendeu bate com o que foi escrito.
  */
 function extrairEsperado(arquivos) {
-  /** @type {Map<string, {colunas: Set<string>, indices: Set<string>, origem: string}>} */
+  /** @type {Map<string, {colunas: Set<string>, indices: Set<string>, nulabilidade: Map<string, {nullable: boolean, origem: string}>, origem: string}>} */
   const tabelas = new Map();
 
   const garante = (nome, origem) => {
     if (!tabelas.has(nome)) {
-      tabelas.set(nome, { colunas: new Set(), indices: new Set(), origem });
+      tabelas.set(nome, {
+        colunas: new Set(), indices: new Set(), nulabilidade: new Map(), origem
+      });
     }
     return tabelas.get(nome);
+  };
+
+  const registraNulabilidade = (tabela, coluna, definicao, origem) => {
+    // COMMENT pode conter a palavra NULL sem alterar o DDL. Só a parte da
+    // definição anterior ao COMMENT participa desta leitura.
+    const ddl = definicao.replace(/\s+COMMENT\s+[\s\S]*$/i, ' ');
+    if (/\bNOT\s+NULL\b/i.test(ddl)) {
+      tabela.nulabilidade.set(coluna, { nullable: false, origem });
+    } else if (/\bNULL\b/i.test(ddl)) {
+      tabela.nulabilidade.set(coluna, { nullable: true, origem });
+    }
   };
 
   for (const arquivo of arquivos) {
@@ -185,8 +199,11 @@ function extrairEsperado(arquivos) {
     while ((m = reCreate.exec(sql)) !== null) {
       const tabela = garante(m[1], origem);
       for (const linha of m[2].split('\n')) {
-        const col = /^\s*`([^`]+)`\s+\S/.exec(linha);
-        if (col) tabela.colunas.add(col[1]);
+        const col = /^\s*`([^`]+)`\s+([\s\S]+)/.exec(linha);
+        if (col) {
+          tabela.colunas.add(col[1]);
+          registraNulabilidade(tabela, col[1], col[2], origem);
+        }
 
         const idx = /^\s*(?:UNIQUE\s+)?(?:KEY|INDEX)\s+`([^`]+)`/i.exec(linha);
         if (idx) tabela.indices.add(idx[1]);
@@ -205,9 +222,20 @@ function extrairEsperado(arquivos) {
       const tabela = garante(alter[1], origem);
       const corpo = alter[2];
 
-      const reCol = /ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?`([^`]+)`/gi;
+      const reCol = /ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?`([^`]+)`([\s\S]*?)(?=,\s*(?:ADD|MODIFY|DROP|CHANGE|RENAME)\b|$)/gi;
       let c;
-      while ((c = reCol.exec(corpo)) !== null) tabela.colunas.add(c[1]);
+      while ((c = reCol.exec(corpo)) !== null) {
+        tabela.colunas.add(c[1]);
+        registraNulabilidade(tabela, c[1], c[2], origem);
+      }
+
+      const reModify = /MODIFY\s+(?:COLUMN\s+)?`([^`]+)`([\s\S]*?)(?=,\s*(?:ADD|MODIFY|DROP|CHANGE|RENAME)\b|$)/gi;
+      while ((c = reModify.exec(corpo)) !== null) {
+        // MODIFY de coluna desconhecida também deve denunciar schema
+        // incompleto, em vez de registrar apenas uma propriedade órfã.
+        tabela.colunas.add(c[1]);
+        registraNulabilidade(tabela, c[1], c[2], origem);
+      }
 
       const reIdx = /ADD\s+(?:UNIQUE\s+)?(?:INDEX|KEY)\s+(?:IF\s+NOT\s+EXISTS\s+)?`([^`]+)`/gi;
       let i;
@@ -233,15 +261,21 @@ async function lerBancoReal(db) {
     `SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()`
   );
   const colunas = await db.query(
-    `SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE()`
+    `SELECT TABLE_NAME, COLUMN_NAME, IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE()`
   );
   const indices = await db.query(
     `SELECT TABLE_NAME, INDEX_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE()`
   );
 
   const real = new Map();
-  for (const r of tabelas) real.set(r.TABLE_NAME, { colunas: new Set(), indices: new Set() });
-  for (const r of colunas) real.get(r.TABLE_NAME)?.colunas.add(r.COLUMN_NAME);
+  for (const r of tabelas) {
+    real.set(r.TABLE_NAME, { colunas: new Set(), indices: new Set(), nulabilidade: new Map() });
+  }
+  for (const r of colunas) {
+    const tabela = real.get(r.TABLE_NAME);
+    tabela?.colunas.add(r.COLUMN_NAME);
+    tabela?.nulabilidade.set(r.COLUMN_NAME, r.IS_NULLABLE === 'YES');
+  }
   for (const r of indices) real.get(r.TABLE_NAME)?.indices.add(r.INDEX_NAME);
   return real;
 }
@@ -253,6 +287,7 @@ async function lerBancoReal(db) {
 function compararSchemas(esperado, real) {
   const tabelasFaltando = [];
   const colunasFaltando = [];
+  const nulabilidadeDivergente = [];
   const indicesFaltando = [];
   const tabelasExtra = [];
 
@@ -267,6 +302,19 @@ function compararSchemas(esperado, real) {
         colunasFaltando.push({ tabela: nome, coluna, origem: decl.origem });
       }
     }
+    for (const [coluna, regra] of decl.nulabilidade || []) {
+      if (!atual.colunas.has(coluna)) continue;
+      const nullable = atual.nulabilidade?.get(coluna);
+      if (typeof nullable === 'boolean' && nullable !== regra.nullable) {
+        nulabilidadeDivergente.push({
+          tabela: nome,
+          coluna,
+          esperado: regra.nullable ? 'NULL' : 'NOT NULL',
+          atual: nullable ? 'NULL' : 'NOT NULL',
+          origem: regra.origem
+        });
+      }
+    }
     for (const indice of decl.indices) {
       if (!atual.indices.has(indice)) {
         indicesFaltando.push({ tabela: nome, indice, origem: decl.origem });
@@ -278,12 +326,16 @@ function compararSchemas(esperado, real) {
     if (!esperado.has(nome)) tabelasExtra.push(nome);
   }
 
-  return { tabelasFaltando, colunasFaltando, indicesFaltando, tabelasExtra };
+  return {
+    tabelasFaltando, colunasFaltando, nulabilidadeDivergente,
+    indicesFaltando, tabelasExtra
+  };
 }
 
 function houveFalta(resultado) {
   return resultado.tabelasFaltando.length > 0
     || resultado.colunasFaltando.length > 0
+    || resultado.nulabilidadeDivergente.length > 0
     || resultado.indicesFaltando.length > 0;
 }
 
@@ -299,13 +351,22 @@ function imprimirEsperado(esperado) {
 }
 
 function imprimirResultado(resultado, strict) {
-  const { tabelasFaltando, colunasFaltando, indicesFaltando, tabelasExtra } = resultado;
+  const {
+    tabelasFaltando, colunasFaltando, nulabilidadeDivergente,
+    indicesFaltando, tabelasExtra
+  } = resultado;
 
   for (const t of tabelasFaltando) {
     console.error(`[FALTA] tabela '${t.tabela}' declarada em ${t.origem} nao existe no banco`);
   }
   for (const c of colunasFaltando) {
     console.error(`[FALTA] coluna '${c.tabela}.${c.coluna}' declarada em ${c.origem} nao existe no banco`);
+  }
+  for (const c of nulabilidadeDivergente) {
+    console.error(
+      `[DIVERGE] coluna '${c.tabela}.${c.coluna}' e ${c.atual}, ` +
+      `mas ${c.origem} declara ${c.esperado}`
+    );
   }
   for (const i of indicesFaltando) {
     console.error(`[FALTA] indice '${i.indice}' em '${i.tabela}' (${i.origem}) nao existe no banco`);

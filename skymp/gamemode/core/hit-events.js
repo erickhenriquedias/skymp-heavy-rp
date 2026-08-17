@@ -127,6 +127,7 @@ const _episodios = new Map();
 let _aoFecharEpisodio = null;
 let _timerDeVarredura = null;
 let _registrado = false;
+let _eventHandler = null;
 
 /**
  * Normaliza o FormID que o cliente reportou.
@@ -240,13 +241,14 @@ function start(aoFecharEpisodio) {
 
   try {
     mp.makeEventSource(NOME_DO_EVENTO, SNIPPET_DO_CLIENTE);
-    mp[NOME_DO_EVENTO] = (pcFormId, evento) => {
+    _eventHandler = (pcFormId, evento) => {
       try {
         registrarGolpe(pcFormId, evento);
       } catch (err) {
         console.error('[hit-events] Falha ao registrar golpe:', err.message);
       }
     };
+    mp[NOME_DO_EVENTO] = _eventHandler;
     _registrado = true;
     console.log('[hit-events] Evento de agressao registrado (evidencia, nao enforcement).');
     return true;
@@ -261,6 +263,10 @@ function stop() {
   _timerDeVarredura = null;
   _episodios.clear();
   _aoFecharEpisodio = null;
+  if (typeof mp !== 'undefined' && mp[NOME_DO_EVENTO] === _eventHandler) {
+    delete mp[NOME_DO_EVENTO];
+  }
+  _eventHandler = null;
   _registrado = false;
 }
 

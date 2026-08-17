@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "test": "node --test server.test.js whitelist-workflow.test.js discord-role-access.test.js staff-access.test.js session-occupancy-notifier.test.js"
+    "test": "node --test server.test.js whitelist-workflow.test.js discord-role-access.test.js steam-identity.test.js staff-access.test.js session-occupancy-notifier.test.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

@@ -59,8 +59,8 @@ describe('voip-service — handshake por ticket', () => {
     assert.ok(port > 0, 'servidor deveria estar escutando numa porta efêmera');
   });
 
-  after(() => {
-    voip.stopVoipServer();
+  after(async () => {
+    await voip.stopVoipServer();
     commands.removeActiveCharacter(ACTOR_ID);
   });
 
@@ -193,6 +193,33 @@ describe('voip-service — handshake por ticket', () => {
       ws.close();
     }
   });
+
+  it('shutdown fecha clientes, limpa credenciais e libera a porta para restart imediato', async () => {
+    const ticket = voip.issueTicket(ACTOR_ID, 'listener');
+    const ws = connect();
+    await new Promise((resolve) => ws.once('open', resolve));
+    ws.send(JSON.stringify({ type: 'auth', actorId: ACTOR_ID, ticket, role: 'listener' }));
+    const reply = await waitForMessage(ws);
+    assert.strictEqual(reply.type, 'auth_ok');
+
+    // Deixa uma credencial ainda pendente para provar que shutdown não mantém
+    // sessão transitória válida depois do restart.
+    voip.issueTicket(ACTOR_ID, 'sender');
+    const closed = waitForClose(ws);
+    await voip.stopVoipServer();
+    await closed;
+
+    assert.strictEqual(voip.getListeningPort(), null);
+    assert.strictEqual(voip._voipClients.size, 0);
+    assert.strictEqual(voip._pendingTickets.size, 0);
+    assert.strictEqual(voip._audienceByActor.size, 0);
+
+    voip.startVoipServer(port, '127.0.0.1');
+    for (let i = 0; i < 50 && voip.getListeningPort() !== port; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.strictEqual(voip.getListeningPort(), port, 'a mesma porta deveria aceitar bind imediato');
+  });
 });
 
 describe('voip-service — quota de audio_frame', () => {
@@ -250,8 +277,8 @@ describe('voip-service — relay de audio_frame por proximidade', () => {
     assert.ok(relayPort > 0);
   });
 
-  after(() => {
-    voip.stopVoipServer();
+  after(async () => {
+    await voip.stopVoipServer();
     delete global.mp;
   });
 
@@ -611,8 +638,8 @@ describe('voip-service — helper e UI do mesmo ator convivendo', () => {
     assert.ok(dualPort > 0);
   });
 
-  after(() => {
-    voip.stopVoipServer();
+  after(async () => {
+    await voip.stopVoipServer();
     delete global.mp;
   });
 
@@ -927,8 +954,8 @@ describe('voip-service — proximidade respeita a célula', () => {
     assert.ok(cellPort > 0);
   });
 
-  after(() => {
-    voip.stopVoipServer();
+  after(async () => {
+    await voip.stopVoipServer();
     delete global.mp;
   });
 

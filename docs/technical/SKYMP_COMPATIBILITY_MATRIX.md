@@ -27,7 +27,10 @@ Data: **2026-08-14**. Responde ao briefing §17, §18 e §19.
 
 **Não existe registro de qual build de servidor está em `skymp/server/`.** O binário está no repositório, o commit de origem não. É o gatilho de `COMPAT-001`.
 
-**GOG e a Anniversary Edition não-patcheada estão declaradas incompatíveis** e nada verifica isso antes do download do modpack.
+**GOG e versões Steam diferentes de 1.6.1170.0 são recusadas pelo launcher**
+antes de save, update, repair, rollback ou JOGAR. A decisão possui teste
+unitário; a leitura real do `FileVersion` no executável empacotado ainda precisa
+ser exercitada em instalações reais.
 
 ---
 
@@ -40,7 +43,9 @@ Hoje, não dá. É a lacuna mais barata de fechar deste documento.
 1. Um arquivo `skymp/server/BUILD_INFO.json` gerado no build, com commit, data e triplet.
 2. O gamemode logar no boot o que o servidor sabe de si — `mp.getServerSettings()` e `mp.getEspmLoadOrder()` — junto do pin declarado, e **recusar subir se divergirem**.
 
-A segunda é o mesmo *fail-closed* do `server-options` e do `LOP-003`, e responde uma pergunta que nenhum arquivo estático responde: *este binário carregou o que achamos que ele carregou?*
+A segunda foi implementada para load order em 16/08/2026: manifesto assinado,
+configuração e lista efetiva precisam ser idênticos antes de `db.init()`. Ainda
+falta registrar o commit do binário e observar o retorno em runtime real.
 
 ---
 
@@ -49,14 +54,15 @@ A segunda é o mesmo *fail-closed* do `server-options` e do `LOP-003`, e respond
 | Peça | Quebra o quê | Detectado por |
 |---|---|---|
 | **Pin do SkyMP** | Superfície da API `mp`; lista de hooks; as 128 funções Papyrus; aplicabilidade de todo patch | `patches/validate.js` (pin) + `PAP-001` (gate de boot) — o segundo não existe ainda |
-| **Skyrim 1.6.x** | SKSE, SkyrimPlatform, todos os plugins nativos | Nada. É verificação manual |
+| **Skyrim 1.6.x** | SKSE, SkyrimPlatform, todos os plugins nativos | Launcher exige Steam `1.6.1170.0`; instalação real empacotada ainda é teste manual |
 | **SKSE** | SkyrimPlatform não carrega | Erro no log do SKSE, na máquina do jogador |
-| **SkyrimPlatform** | `makeEventSource` — o snippet roda contra a API `sp` daquela versão | Nada. **Falha silenciosa**: o event source simplesmente não reporta |
+| **SkyrimPlatform** | `makeEventSource` — o snippet roda contra a API `sp` daquela versão | Manifesto detecta qualquer byte JS/DLL diferente; harness in-game da API ainda falta e a falha funcional pode ser silenciosa |
 | **Load order** | Todo FormID depois do plugin deslocado, e todo FormID persistido no nosso banco | Gate de paridade do launcher; ver [`PLUGIN_LOAD_ORDER_STRATEGY.md`](PLUGIN_LOAD_ORDER_STRATEGY.md) |
 | **Modpack** | Hash do manifesto; índices; assets | Gate de paridade |
 | **Gamemode** | Só quem logar depois recebe event source novo (`enableGamemodeDataUpdatesBroadcast: false`) | Nada |
 
-As três linhas com "nada" na coluna da direita são o trabalho que este documento aponta.
+Paridade de bytes não comprova compatibilidade funcional. O harness real de
+Skyrim Platform e o gate de gamemode continuam sendo o trabalho apontado aqui.
 
 A do SkyrimPlatform é a mais traiçoeira: um snippet de `makeEventSource` que usa uma API removida numa versão nova **não derruba o cliente e não avisa o servidor**. Ele só para de reportar. Some o `hit-events`, some o `_onUiEvent`, e a suíte continua verde porque nada disso é testável fora do jogo.
 

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import type { AuthData, PublicServerStatus } from '../types/electron';
-import { Play, Settings as SettingsIcon, LogOut } from 'lucide-react';
+import type { AuthData, LaunchRepairAction, PublicServerStatus } from '../types/electron';
+import { Play, Settings as SettingsIcon, LogOut, Wrench, XCircle } from 'lucide-react';
 
 interface HomeProps {
   auth: AuthData;
@@ -29,7 +29,10 @@ const SERVER_STATUS_VIEW = {
 export function Home({ auth, setAuth }: HomeProps) {
   const navigate = useNavigate();
   const [isPlaying, setIsPlaying] = useState(false);
+  const [isUpdateActive, setIsUpdateActive] = useState(false);
   const [status, setStatus] = useState<string>('');
+  const [repairAction, setRepairAction] = useState<LaunchRepairAction | null>(null);
+  const [problems, setProblems] = useState<string[]>([]);
   const [serverStatus, setServerStatus] = useState<PublicServerStatus>(INITIAL_SERVER_STATUS);
   const queuePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -67,24 +70,46 @@ export function Home({ auth, setAuth }: HomeProps) {
     };
   }, []);
 
-  const startQueuePolling = (gamePath: string) => {
+  useEffect(() => {
+    const showProgress = (scope: string) => (value: { phase?: string; percent?: number }) => {
+      const percent = Number.isFinite(value?.percent) ? ` ${value.percent}%` : '';
+      setStatus(`${scope}: ${value?.phase || 'processando'}${percent}`);
+    };
+    window.electronAPI.onUpdateProgress(showProgress('Atualizando cliente'));
+    window.electronAPI.onModsUpdateProgress(showProgress('Atualizando mods'));
+  }, []);
+
+  const launchPreparedGame = async (gamePath: string, ticket: string, preparationToken: string) => {
+    setStatus('Iniciando Skyrim...');
+    setIsPlaying(true);
+    const launched = await window.electronAPI.launchGame(gamePath, ticket, preparationToken);
+    setIsPlaying(false);
+    if (!launched.success) {
+      setRepairAction('retry');
+      setStatus(`Não foi possível iniciar: ${launched.error || 'preparação recusada'}`);
+    }
+  };
+
+  const startQueuePolling = (gamePath: string, preparationToken: string) => {
     stopQueuePolling();
     queuePollRef.current = setInterval(async () => {
       try {
-        const pollRes = await window.electronAPI.pollQueue();
+        const pollRes = await window.electronAPI.pollQueue(preparationToken, gamePath);
         if (pollRes.status === 'queued') {
           setStatus(`Na fila (posicao: ${pollRes.position})`);
           return;
         }
         stopQueuePolling();
         if (pollRes.status === 'success') {
-          setStatus('Iniciando Skyrim...');
-          setIsPlaying(true);
-          await window.electronAPI.launchGame(gamePath, pollRes.ticket);
-          setIsPlaying(false);
+          await launchPreparedGame(gamePath, pollRes.ticket, preparationToken);
           return;
         }
-        setStatus(`Erro: ${pollRes.message || 'fila indisponivel'}`);
+        if (pollRes.message === 'preparation_required') {
+          setRepairAction('retry');
+          setStatus('A verificação expirou durante a fila. Valide novamente para continuar.');
+        } else {
+          setStatus(`Erro: ${pollRes.message || 'fila indisponivel'}`);
+        }
       } catch (e: any) {
         stopQueuePolling();
         setStatus(`Erro: ${e.message}`);
@@ -104,6 +129,8 @@ export function Home({ auth, setAuth }: HomeProps) {
       return;
     }
     setIsPlaying(true);
+    setRepairAction(null);
+    setProblems([]);
     setStatus('Verificando pasta do jogo...');
     try {
       const config = await window.electronAPI.getLauncherConfig();
@@ -123,47 +150,113 @@ export function Home({ auth, setAuth }: HomeProps) {
 
       await window.electronAPI.ensureSkyrimIni({ repairOnly: true });
 
-      setStatus('Validando mods com o servidor...');
-      const verify = await window.electronAPI.verifyMods(gamePath);
-      if (!verify.success) {
-        const problems = Array.isArray(verify.problems) ? verify.problems : [];
-        const visible = problems.slice(0, 3).join(' · ');
-        const remaining = Math.max(0, problems.length - 3);
-        setStatus(
-          problems.length > 0
-            ? `Mods inválidos (${problems.length}): ${visible}${remaining > 0 ? ` · e mais ${remaining}` : ''}`
-            : `Mods inválidos: ${verify.error || 'verificação falhou'}`
-        );
+      setStatus('Conferindo atualizações, modpack e load order...');
+      const preparation = await window.electronAPI.prepareToPlay(gamePath);
+      if (preparation.status !== 'ready' || !preparation.preparationToken) {
+        const nextProblems = Array.isArray(preparation.problems) ? preparation.problems : [];
+        setProblems(nextProblems);
+        setRepairAction(preparation.action || 'retry');
+        const visible = nextProblems.slice(0, 3).join(' · ');
+        const remaining = Math.max(0, nextProblems.length - 3);
+        setStatus(`${preparation.message || 'Preparação para jogar falhou.'}${visible ? ` ${visible}${remaining > 0 ? ` · e mais ${remaining}` : ''}` : ''}`);
         return;
-      }
-
-      if (verify.loadOrder) {
-        await window.electronAPI.syncLoadorder(gamePath, verify.loadOrder);
-        const analysis = await window.electronAPI.analyzePlugins(gamePath, verify.loadOrder);
-        if (!analysis.ok) {
-          setStatus(`Problema no load order: ${analysis.problems[0]}`);
-          return;
-        }
       }
 
       setStatus('Entrando na fila...');
-      const queueRes = await window.electronAPI.joinQueue();
+      const queueRes = await window.electronAPI.joinQueue(preparation.preparationToken, gamePath);
       if (queueRes.status === 'queued') {
         setStatus(`Na fila (posicao: ${queueRes.position})`);
-        startQueuePolling(gamePath);
+        startQueuePolling(gamePath, preparation.preparationToken);
         return;
       }
       if (queueRes.status === 'success') {
-        setStatus('Iniciando Skyrim...');
-        await window.electronAPI.launchGame(gamePath, queueRes.ticket);
+        await launchPreparedGame(gamePath, queueRes.ticket, preparation.preparationToken);
         return;
       }
-      setStatus(`Erro: ${queueRes.message || 'fila indisponivel'}`);
+      if (queueRes.message === 'preparation_required') {
+        setRepairAction('retry');
+        setStatus('A preparação expirou. Valide novamente antes de entrar na fila.');
+      } else {
+        setStatus(`Erro: ${queueRes.message || 'fila indisponivel'}`);
+      }
     } catch (e: any) {
       setStatus(`Erro: ${e.message}`);
     } finally {
       setIsPlaying(false);
     }
+  };
+
+  const handleRepair = async () => {
+    if (!repairAction) return;
+    if (repairAction === 'settings') {
+      navigate('/settings');
+      return;
+    }
+    if (repairAction === 'retry') {
+      await handlePlay();
+      return;
+    }
+    const config = await window.electronAPI.getLauncherConfig();
+    if (!config.gamePath) {
+      navigate('/settings');
+      return;
+    }
+    const labels: Record<string, string> = {
+      'update-client': 'Atualizar cliente',
+      'update-mods': 'Atualizar modpack',
+      'repair-mods': 'Reparar arquivos divergentes',
+    };
+    if (!confirm(`${labels[repairAction]} agora? O jogo precisa permanecer fechado.`)) return;
+    setIsPlaying(true);
+    setIsUpdateActive(true);
+    setProblems([]);
+    setStatus(`${labels[repairAction]}...`);
+    try {
+      let result = repairAction === 'update-client'
+        ? await window.electronAPI.installClientUpdate(config.gamePath)
+        : repairAction === 'update-mods'
+          ? await window.electronAPI.installModsUpdate(config.gamePath, false)
+          : await window.electronAPI.repairModsIncremental(config.gamePath, false);
+      if (result.confirmationRequired) {
+        const sizeMb = Math.ceil(Number(result.downloadBytes || 0) / (1024 * 1024));
+        if (!confirm(`O repair precisa baixar aproximadamente ${sizeMb} MB. Continuar?`)) {
+          setStatus('Repair cancelado antes do download.');
+          return;
+        }
+        result = await window.electronAPI.repairModsIncremental(config.gamePath, true);
+      }
+      if (!result.success) {
+        if (result.cancelled) {
+          setStatus('Operação cancelada com segurança. Nenhum arquivo foi publicado.');
+          return;
+        }
+        const manual = Array.isArray(result.manualFiles) ? ` Arquivos manuais: ${result.manualFiles.slice(0, 5).join(', ')}` : '';
+        const unsafe = Array.isArray(result.unsafeFiles) ? ` Destinos inseguros: ${result.unsafeFiles.slice(0, 5).join(', ')}` : '';
+        setStatus(`Falha no reparo: ${result.error || 'erro desconhecido'}${manual}${unsafe}`);
+        return;
+      }
+      setRepairAction(null);
+      setStatus('Reparo concluído. Validando novamente...');
+      await handlePlay();
+    } catch (e: any) {
+      setStatus(`Falha no reparo: ${e.message}`);
+    } finally {
+      setIsUpdateActive(false);
+      setIsPlaying(false);
+    }
+  };
+
+  const handleCancelUpdate = async () => {
+    const result = await window.electronAPI.cancelUpdateOperation();
+    if (result.success) {
+      setStatus(result.alreadyRequested ? 'Cancelamento já solicitado...' : 'Cancelando com segurança...');
+      return;
+    }
+    if (result.reason === 'commit_in_progress') {
+      setStatus('A publicação final já começou e não pode ser interrompida. Aguarde a conclusão.');
+      return;
+    }
+    setStatus('Não há download ou reparo cancelável em andamento.');
   };
 
   const serverView = SERVER_STATUS_VIEW[serverStatus.state];
@@ -227,7 +320,29 @@ export function Home({ auth, setAuth }: HomeProps) {
           {isPlaying ? 'AGUARDE' : serverStatus.state === 'full' ? 'ENTRAR NA FILA' : 'JOGAR'}
         </button>
 
+        {isUpdateActive && (
+          <button className="btn-secondary" onClick={handleCancelUpdate} style={{ padding: '10px 18px' }}>
+            <XCircle size={18} />
+            CANCELAR OPERAÇÃO
+          </button>
+        )}
+
         {status && <p style={{ color: 'var(--accent-gold)', textAlign: 'center', maxWidth: '620px' }}>{status}</p>}
+        {repairAction && (
+          <button className="btn-secondary" onClick={handleRepair} disabled={isPlaying} style={{ padding: '12px 20px' }}>
+            <Wrench size={18} />
+            {repairAction === 'update-client' ? 'ATUALIZAR CLIENTE'
+              : repairAction === 'update-mods' ? 'ATUALIZAR MODS'
+                : repairAction === 'repair-mods' ? 'REPARAR MODS'
+                  : repairAction === 'settings' ? 'ABRIR CONFIGURAÇÕES' : 'TENTAR NOVAMENTE'}
+          </button>
+        )}
+        {problems.length > 0 && (
+          <details style={{ color: 'var(--text-muted)', maxWidth: '620px', width: '100%' }}>
+            <summary>Ver diagnóstico ({problems.length})</summary>
+            <pre style={{ whiteSpace: 'pre-wrap', fontSize: '12px' }}>{problems.join('\n')}</pre>
+          </details>
+        )}
       </div>
     </div>
   );

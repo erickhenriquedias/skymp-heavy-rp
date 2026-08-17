@@ -66,7 +66,7 @@ Não é um bug que dá pra contornar com mais validação no servidor — o banc
 
 É também o motivo de o launcher (`apps/launcher/electron/main.ts`) fazer duas coisas separadas:
 
-1. `verify-mods`: compara o hash de cada arquivo em `Data/` com `mods.json` do servidor — garante que o **conteúdo** é igual.
+1. `verify-mods`: autentica o envelope Ed25519 de paridade v2 e compara tamanho e SHA-256 de cada path canônico, inclusive subdiretórios de `Data/`, com `mods.json` do servidor — garante que o **conteúdo** é igual.
 2. `analyze-plugins`: lê o header de cada plugin, confere se todos os masters existem e se aparecem **antes** do dependente — garante que a **ordem** é igual.
 
 As duas juntas é que sustentam o contrato. Uma sozinha não basta.

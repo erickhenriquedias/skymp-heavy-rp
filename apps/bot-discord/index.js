@@ -7,6 +7,7 @@ const voiceChannels = require('./voiceChannels');
 const moderationLog = require('./moderationLog');
 const gameAccess = require('./gameAccess');
 const { deployCommands } = require('./deploy-commands');
+const { getBotReadiness } = require('./bot-readiness');
 const { createSlidingWindowRateLimiter } = require('../../skymp/packages/sliding-rate-limiter');
 
 app.use(express.json());
@@ -234,10 +235,34 @@ app.post('/api/moderation-log', (req, res) => {
 
 const PORT = process.env.PORT || 3002;
 const HOST = '127.0.0.1'; // API interna: nunca expor em todas as interfaces
-app.listen(PORT, HOST, () => {
+app.get('/health', (_req, res) => res.json({ ok: true }));
+app.get('/ready', (_req, res) => {
+    const status = getBotReadiness(client);
+    res.status(status.ready ? 200 : 503).json(status);
+});
+
+const server = app.listen(PORT, HOST, () => {
     console.log(`[discord-bot] API interna rodando em http://${HOST}:${PORT}`);
 });
 
-client.login(process.env.DISCORD_BOT_TOKEN).catch(err => {
+let shutdownPromise = null;
+function shutdown(signal, exitCode = 0) {
+    if (shutdownPromise) return shutdownPromise;
+    process.exitCode = exitCode;
+    shutdownPromise = new Promise(resolve => server.close(resolve))
+        .then(() => client.destroy())
+        .then(() => console.log(`[discord-bot] Encerrado por ${signal}.`))
+        .catch(error => {
+            process.exitCode = 1;
+            console.error(`[discord-bot] Falha no shutdown: ${error.message}`);
+        });
+    return shutdownPromise;
+}
+
+process.once('SIGINT', () => shutdown('SIGINT'));
+process.once('SIGTERM', () => shutdown('SIGTERM'));
+
+client.login(process.env.DISCORD_BOT_TOKEN).catch(() => {
     console.error("[discord-bot] Falha ao logar no Discord. Verifique o DISCORD_BOT_TOKEN no arquivo .env");
+    return shutdown('discord-login-failed', 1);
 });

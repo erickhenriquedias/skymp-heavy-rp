@@ -615,16 +615,40 @@ function getListeningPort() {
 }
 
 /**
- * Encerra o servidor de sinalização (usado por testes; não há caminho de
- * shutdown em produção hoje, o módulo não declara shutdown no module-registry).
+ * Encerra o servidor de sinalização e todos os sockets antes de devolver.
+ * O await é o que permite reiniciar imediatamente sem encontrar a porta ainda
+ * ocupada. Tickets e estado transitório também não sobrevivem ao lifecycle.
  */
-function stopVoipServer() {
+async function stopVoipServer() {
   if (_proximityTimer) clearInterval(_proximityTimer);
   _proximityTimer = null;
   _audienceByActor.clear();
-  if (!wss) return;
-  wss.close();
+  _pendingTickets.clear();
+
+  if (!wss) {
+    voipClients.clear();
+    return;
+  }
+  const server = wss;
   wss = null;
+
+  // `WebSocketServer.close()` espera clientes conectados encerrarem. Durante
+  // shutdown não existe negociação útil a preservar; terminar primeiro evita
+  // o processo ficar preso indefinidamente por um cliente morto ou hostil.
+  for (const socket of server.clients) {
+    try { socket.terminate(); } catch { /* já encerrado */ }
+  }
+
+  try {
+    await new Promise((resolve, reject) => {
+      server.close((err) => {
+        if (err && err.code !== 'ERR_SERVER_NOT_RUNNING') reject(err);
+        else resolve();
+      });
+    });
+  } finally {
+    voipClients.clear();
+  }
 }
 
 /**

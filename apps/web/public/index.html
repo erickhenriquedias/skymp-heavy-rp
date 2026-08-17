@@ -217,7 +217,10 @@ async function renderWhitelist(el) {
     <table>
       <thead><tr><th>Discord</th><th>Personagem</th><th>Status</th><th>Data</th><th>Ações</th></tr></thead>
       <tbody>${rows.map(r=>`<tr>
-        <td>${escapeHtml(r.discord_name) || '—'}</td>
+        <td>${escapeHtml(r.discord_name) || '—'}
+          <div style="color:var(--muted);font-size:11px">Discord: ${escapeHtml(r.discord_id) || '—'}</div>
+          <div style="color:var(--muted);font-size:11px">Steam: ${escapeHtml(r.steam_id) || 'não vinculado'}</div>
+        </td>
         <td>${r.first_name ? escapeHtml(r.first_name)+' '+escapeHtml(r.last_name) : '—'}${r.needs_extra_review ? ' <span class="pill pill-rejected" title="Conceito forte — revisar com atenção">⚠ Revisão extra</span>' : ''}</td>
         <td><span class="pill pill-${r.status}">${r.status}</span></td>
         <td style="color:var(--muted)">${fmt(r.created_at)}</td>
@@ -286,7 +289,7 @@ async function renderCharacters(el) {
       <thead><tr><th>Nome IC</th><th>Discord</th><th>Status</th><th>Ouro</th><th>Criado em</th></tr></thead>
       <tbody>${rows.map(r=>`<tr>
         <td><strong>${escapeHtml(r.first_name)} ${escapeHtml(r.last_name)}</strong></td>
-        <td style="color:var(--muted)">${escapeHtml(r.discord_name)||'—'}</td>
+        <td style="color:var(--muted)">${escapeHtml(r.discord_name)||'—'}<br><small>Steam: ${escapeHtml(r.steam_id)||'não vinculado'}</small></td>
         <td><span class="pill pill-${r.status}">${r.status}</span></td>
         <td>⚜ ${r.gold.toLocaleString()}</td>
         <td style="color:var(--muted)">${fmt(r.created_at)}</td>
@@ -301,7 +304,7 @@ async function searchChars(q) {
   const rows = await api(`/api/characters?q=${encodeURIComponent(q)}`);
   document.querySelector('#chars-table tbody').innerHTML = rows.map(r=>`<tr>
     <td><strong>${escapeHtml(r.first_name)} ${escapeHtml(r.last_name)}</strong></td>
-    <td style="color:var(--muted)">${escapeHtml(r.discord_name)||'—'}</td>
+    <td style="color:var(--muted)">${escapeHtml(r.discord_name)||'—'}<br><small>Steam: ${escapeHtml(r.steam_id)||'não vinculado'}</small></td>
     <td><span class="pill pill-${r.status}">${r.status}</span></td>
     <td>⚜ ${r.gold.toLocaleString()}</td>
     <td style="color:var(--muted)">${fmt(r.created_at)}</td>

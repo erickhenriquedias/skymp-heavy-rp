@@ -182,7 +182,9 @@ Criar uma sandbox RP controlada com prova de conceito de persistencia.
 ### Tarefas
 
 - Criar schema do banco para contas e personagens.
-- Vincular identidade do jogador a Discord e Steam quando possivel.
+- Autenticar a conta exclusivamente pelo Discord. Quando o Discord retornar uma
+  conexão Steam verificada, guardar o `steam_id` somente como identificador
+  secundário; ele não concede login, whitelist ou permissão.
 - Implementar primeiro registro de personagem.
 - Salvar/carregar estado do personagem.
 - Adicionar configuracao basica do servidor.
@@ -481,7 +483,6 @@ Rodar o projeto de forma sustentavel.
 
 - `accounts`
 - `discord_identities`
-- `steam_identities`
 - `whitelist_applications`
 - `characters`
 - `character_positions`

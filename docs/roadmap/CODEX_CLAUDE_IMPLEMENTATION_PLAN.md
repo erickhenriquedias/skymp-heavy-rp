@@ -181,13 +181,13 @@ Arquivos liberados para o outro agente:
 | MOD-001 | Claude | Codex | READY_THURSDAY | C0-01 |
 | MOD-002 | Claude | Codex | BLOCKED | MOD-001 |
 | MOD-003 | Claude | Codex | BLOCKED | MOD-002 |
-| MOD-004 | Claude | Codex | BLOCKED | MOD-003 |
+| MOD-004 | Claude | Codex | DONE_AWAITING_RUNTIME_TEST | MOD-003 |
 | CHR-001 | Codex | Claude | DESIGN_READY_BLOCKED | AUTH-003/004 |
 | CHR-002 | Codex | Claude | BLOCKED | CHR-001 |
 | FAC-001..004 | Codex | Claude | BLOCKED | Fase 2 |
 | PROP-001..004 | Claude | Codex | BLOCKED | Fase 2 + FAC-003 |
 | VOI-001 | conjunto | conjunto | PLANNED | capacidade de laboratório |
-| OPS-001 | conjunto | conjunto | PLANNED | MOD-001 |
+| OPS-001 | conjunto | conjunto | DONE_AWAITING_RUNTIME_TEST | MOD-001 |
 
 Preparação adicional concluída em 2026-08-12: ADR de identidade online, auditoria de atomicidade do launch ticket, biblioteca isolada de credenciais opacas, config doctor e desenho de CHR-001. O estado detalhado e os gates de revisão estão em `CODEX_PRE_CLAUDE_HANDOFF_2026-08-12.md`.
 

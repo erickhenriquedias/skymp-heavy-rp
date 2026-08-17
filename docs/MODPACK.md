@@ -19,7 +19,8 @@
 ## Masters Base
 
 Estes são os masters obrigatórios da base do Skyrim SE + conteúdo Creation Club
-que o servidor exige. São verificados por hash MD5 para garantir a versão correta.
+que o servidor exige. São verificados por tamanho e SHA-256 no manifesto v2
+assinado para garantir a versão correta.
 
 | # | Arquivo | Tipo | Descrição |
 |---|---------|------|-----------|
@@ -169,9 +170,10 @@ Ordem de carregamento exata imposta pelo servidor via `plugins.txt`:
 
 ## Notas
 
-### Mods Bloqueados pelo Launcher (Quarentena)
+### Mods extras bloqueados
 
-O launcher move automaticamente para `Data\_disabledByLauncher\` qualquer mod fora da lista acima:
+O launcher diagnostica e bloqueia mods extras conforme `extraFilePolicy`. Ele
+**não apaga nem move arquivos automaticamente**; remova ou desative manualmente:
 
 - **OpenAnimationReplacer** — crashes com SkyMP
 - **PairedAnimationImprovements** — crashes reportados
@@ -184,11 +186,21 @@ O launcher detecta e bloqueia GOG e AE não-downgradeados.
 
 ### Geração do mods.json para o Servidor
 
+O JSON não deve ser montado manualmente. Use o gerador assinado com a pasta
+`Data/` de referência, `plugins.txt`, build, sequência e key id. Mapeie em
+`distribution-map.json` somente os arquivos que podem ser redistribuídos:
+
 ```powershell
-# Gerar hashes MD5 de todos os mods na pasta Data
-Get-ChildItem "C:\Games\Skyrim Special Edition\Data" -Include "*.esp","*.esm","*.esl" |
-  ForEach-Object {
-    $hash = (Get-FileHash $_.FullName -Algorithm MD5).Hash.ToLower()
-    [PSCustomObject]@{ filename = $_.Name; hash = $hash }
-  } | ConvertTo-Json -Depth 2
+$env:UPDATE_SIGNING_PRIVATE_KEY = '<PKCS8_DER_BASE64>'
+cd apps/game-api
+node scripts/generate-mods-manifest.js `
+  "C:/Games/Skyrim Special Edition/Data" `
+  --plugins-txt "$env:LOCALAPPDATA/Skyrim Special Edition/plugins.txt" `
+  --channel stable --build "2026.08.16" --sequence 42 `
+  --key-id release-2026 --distribution-map distribution-map.json `
+  --extra-file-policy reject --out mods.json
+Remove-Item Env:UPDATE_SIGNING_PRIVATE_KEY
 ```
+
+Detalhes de assinatura, rotação e repair estão em
+[`LAUNCHER_DISTRIBUTION.md`](technical/LAUNCHER_DISTRIBUTION.md).

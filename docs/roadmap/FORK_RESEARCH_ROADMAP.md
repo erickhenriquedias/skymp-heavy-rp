@@ -53,7 +53,13 @@ OPS/MODPACK e VOICE podem avançar em paralelo, sem ativar gameplay PARKED.
 - **Pronto:** suite em CI e artefato local explicitamente separado de produção.
 - **Testes:** duplicação de packet, stale ticket, slot trocado, token em log e 100 reconnects.
 
-### MOD-001 — Manifesto canônico v1
+### MOD-001 — Manifesto canônico v2
+
+> **Implementado no código em 16/08/2026; aguardando validação operacional:**
+> contrato compartilhado estrito, paths canônicos `Data/...`, enumeração
+> recursiva, tamanho e SHA-256 por stream, categorias, load order obrigatória,
+> política de extras e colisões case-insensitive. Reprodutibilidade entre duas
+> máquinas e arquivos reais grandes continua na matriz de testes.
 
 - **Objetivo:** definir paths, ordem, tamanho, SHA-256, masters, build id e assinatura.
 - **Dependências:** nenhuma.
@@ -65,6 +71,11 @@ OPS/MODPACK e VOICE podem avançar em paralelo, sem ativar gameplay PARKED.
 
 ### MOD-002 — Gerador assinado
 
+> **Implementado no código em 16/08/2026; aguardando release real:** o envelope
+> Ed25519 cobre `client`, `mods` e `parity`, com validade, sequência monotônica,
+> key id/rotação e chave privada somente no ambiente do gerador. O game-api e o
+> launcher verificam o manifesto de paridade antes de consumir o payload.
+
 - **Objetivo:** produzir hashes e assinatura sem expor chave de release.
 - **Dependências:** MOD-001.
 - **Arquivos prováveis:** `apps/game-api/scripts/generate-mods-manifest.js`, CI release.
@@ -74,6 +85,16 @@ OPS/MODPACK e VOICE podem avançar em paralelo, sem ativar gameplay PARKED.
 - **Testes:** tamper, missing file, duplicate plugin e chave errada.
 
 ### MOD-003 — Verificação no launcher
+
+> **Implementado no código em 16/08/2026; aguardando runtime empacotado:** o
+> launcher autentica os três feeds, aplica validade/anti-downgrade, bloqueia o
+> boot por recibo e oferece repair incremental transacional. Só baixa entradas
+> redistribuíveis divergentes, exige confirmação acima de 500 MB, recusa links e
+> extras, revalida tudo após o commit e faz rollback se o resultado não fechar.
+> Cancelamento cooperativo foi implementado em 16/08/2026 para update de
+> cliente, update de mods e repair: aborta transporte/staging antes da
+> publicação e é deliberadamente recusado durante commit. Quarentena de extras
+> continua pendente; hoje eles são diagnosticados e exigem correção manual.
 
 - **Objetivo:** bloquear boot com pack inválido e mostrar reparo seguro.
 - **Dependências:** MOD-002.

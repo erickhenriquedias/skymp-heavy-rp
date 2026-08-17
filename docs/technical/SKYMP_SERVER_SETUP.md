@@ -140,6 +140,8 @@ Estas sao as flags que existem — uma por descriptor registrado em
 `skymp/gamemode/.env.example`; copie de la, nao daqui:
 
 ```env
+PARITY_MANIFEST_PATH=../../apps/game-api/mods.json
+MODS_MANIFEST_PUBLIC_KEYS={"release-2026":"COLE_A_CHAVE_PUBLICA_SPKI_BASE64"}
 ENABLE_NPC_CLEANER=false
 ENABLE_DEATH_SERVICE=false
 ENABLE_GOVERNANCE_SERVICE=false
@@ -147,6 +149,11 @@ ENABLE_MARKET_STALLS_SERVICE=false
 ENABLE_PLAYER_PANEL_SERVICE=false
 ENABLE_VOIP_SERVICE=false
 ```
+
+As duas primeiras variáveis são obrigatórias para o gate de load order. A chave
+é pública e deve ser idêntica à da game-api; o manifesto assinado precisa ser o
+mesmo servido em `/mods.json`. Divergência entre ele, `server-settings` e
+`mp.getEspmLoadOrder()` aborta o boot antes do MariaDB.
 
 > Este bloco listava `ENABLE_JUSTICE_SERVICE`, `ENABLE_SURVIVAL_SERVICE`,
 > `ENABLE_FACTION_SERVICE` e `ENABLE_REGIONAL_ECONOMY`, e nao listava

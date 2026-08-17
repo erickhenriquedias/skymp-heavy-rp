@@ -6,7 +6,9 @@
   },
   "files": [
     "dist/**/*",
-    "dist-electron/**/*"
+    "dist-electron/main.js",
+    "dist-electron/preload.js",
+    "package.json"
   ],
   "extraMetadata": {
     "main": "dist-electron/main.js"

@@ -1,186 +1,89 @@
-const { test, describe, before, after } = require('node:test');
-const assert = require('node:assert/strict');
-const fs = require('fs');
-const os = require('os');
-const path = require('path');
+'use strict';
 
+const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { after, before, describe, test } = require('node:test');
+const { signUpdateManifest } = require('../../skymp/packages/signed-update-manifest');
 const { createManifestLoader, isValidManifest } = require('./modsManifest');
 
-let tmpDir;
-
+let root;
+let keys;
 before(() => {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mods-manifest-test-'));
+  root = fs.mkdtempSync(path.join(os.tmpdir(), 'mods-loader-v2-'));
+  const pair = crypto.generateKeyPairSync('ed25519');
+  keys = {
+    publicKey: pair.publicKey.export({ format: 'der', type: 'spki' }).toString('base64'),
+    privateKey: pair.privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64'),
+  };
 });
+after(() => fs.rmSync(root, { recursive: true, force: true }));
 
-after(() => {
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-});
-
-function writeManifest(name, content) {
-  const p = path.join(tmpDir, name);
-  fs.writeFileSync(p, typeof content === 'string' ? content : JSON.stringify(content));
-  return p;
-}
-
-function publishableEnvelope(content) {
+function payload(overrides = {}) {
   return {
-    manifestVersion: 1,
-    channel: 'development',
-    build: 'test-build',
-    ...content
+    kind: 'parity', manifestVersion: 2, channel: 'development', build: 'test',
+    generatedAt: '2026-08-16T12:00:00.000Z', extraFilePolicy: 'reject',
+    files: [{ path: 'Data/Test.esp', size: 1, sha256: 'a'.repeat(64), required: true, category: 'plugin' }],
+    loadOrder: ['Test.esp'], ...overrides,
   };
 }
+function envelope(overrides = {}) {
+  return signUpdateManifest({
+    keyId: 'current', sequence: overrides.sequence || 1,
+    issuedAt: '2026-08-16T12:00:00.000Z', expiresAt: '2026-08-23T12:00:00.000Z',
+    payload: payload(overrides.payload), privateKey: keys.privateKey,
+  });
+}
+function write(name, value) {
+  const target = path.join(root, name);
+  fs.writeFileSync(target, typeof value === 'string' ? value : JSON.stringify(value));
+  return target;
+}
+function loader(target, publicKey = keys.publicKey) {
+  return createManifestLoader(target, { publicKeys: { current: publicKey }, now: () => Date.parse('2026-08-17T00:00:00.000Z') });
+}
 
-describe('validação de forma do manifesto', () => {
-  test('aceita manifesto bem formado', () => {
-    assert.equal(isValidManifest({
-      mods: [{ filename: 'Skyrim.esm', hash: 'abc' }],
-      loadOrder: ['Skyrim.esm']
-    }), true);
+describe('loader assinado do manifesto v2', () => {
+  test('aceita payload v2 completo e expõe envelope original', () => {
+    const target = write('valid.json', envelope());
+    const result = loader(target).load();
+    assert.equal(result.ok, true);
+    assert.equal(result.manifest.files.length, 1);
+    assert.equal(result.envelope.signatureVersion, 1);
   });
 
-  test('manifesto vazio é uma forma reconhecível, mas não publicável', () => {
-    assert.equal(isValidManifest({ mods: [], loadOrder: [] }), true);
+  test('recusa ausente, JSON inválido, v1 e forma inválida', () => {
+    assert.equal(loader(path.join(root, 'missing')).load().reason, 'manifest_missing');
+    assert.equal(loader(write('broken.json', '{x')).load().reason, 'manifest_invalid_json');
+    assert.equal(loader(write('v1.json', envelope({ payload: { manifestVersion: 1 } }))).load().reason, 'manifest_unsupported_version');
+    assert.equal(loader(write('shape.json', envelope({ payload: { files: [] } }))).load().reason, 'manifest_invalid_files');
   });
 
-  test('rejeita mod sem hash', () => {
-    assert.equal(isValidManifest({ mods: [{ filename: 'a.esp' }], loadOrder: [] }), false);
+  test('recusa adulteração, chave desconhecida e manifesto expirado', () => {
+    const signed = envelope();
+    signed.payload.build = 'tampered';
+    assert.equal(loader(write('tampered.json', signed)).load().reason, 'MANIFEST_SIGNATURE_INVALID');
+    assert.equal(loader(write('wrong-key.json', envelope()), crypto.generateKeyPairSync('ed25519').publicKey.export({ format: 'der', type: 'spki' }).toString('base64')).load().reason, 'MANIFEST_SIGNATURE_INVALID');
+    const expiredLoader = createManifestLoader(write('expired.json', envelope()), {
+      publicKeys: { current: keys.publicKey }, now: () => Date.parse('2026-09-01T00:00:00.000Z'),
+    });
+    assert.equal(expiredLoader.load().reason, 'MANIFEST_EXPIRED');
   });
 
-  test('rejeita mod sem filename', () => {
-    assert.equal(isValidManifest({ mods: [{ hash: 'abc' }], loadOrder: [] }), false);
-  });
-
-  test('rejeita ausência de loadOrder', () => {
-    assert.equal(isValidManifest({ mods: [] }), false);
-  });
-
-  test('rejeita não-objeto', () => {
-    assert.equal(isValidManifest(null), false);
-    assert.equal(isValidManifest('{}'), false);
+  test('cache é invalidado por mtime', () => {
+    const target = write('cache.json', envelope());
+    const instance = loader(target);
+    assert.equal(instance.load().release.sequence, 1);
+    fs.writeFileSync(target, JSON.stringify(envelope({ sequence: 2 })));
+    const future = new Date(Date.now() + 5000);
+    fs.utimesSync(target, future, future);
+    assert.equal(instance.load().release.sequence, 2);
   });
 });
 
-describe('loader', () => {
-  test('manifesto ausente reporta erro em vez de lista vazia', () => {
-    // Este é o ponto central: lista vazia passaria na verificação de paridade
-    // do launcher e deixaria qualquer modpack entrar.
-    const loader = createManifestLoader(path.join(tmpDir, 'nao-existe.json'));
-    const result = loader.load();
-    assert.equal(result.ok, false);
-    assert.equal(result.reason, 'manifest_missing');
-    assert.equal(result.manifest, undefined);
-  });
-
-  test('JSON corrompido reporta erro', () => {
-    const p = writeManifest('corrompido.json', '{ isso nao e json');
-    const result = createManifestLoader(p).load();
-    assert.equal(result.ok, false);
-    assert.equal(result.reason, 'manifest_invalid_json');
-  });
-
-  test('forma inválida reporta erro', () => {
-    const p = writeManifest('forma-errada.json', publishableEnvelope({
-      mods: [{ filename: 'a.esp' }],
-      loadOrder: []
-    }));
-    const result = createManifestLoader(p).load();
-    assert.equal(result.ok, false);
-    assert.equal(result.reason, 'manifest_invalid_shape');
-  });
-
-  test('manifesto legado sem versão é recusado explicitamente', () => {
-    const p = writeManifest('legado.json', {
-      mods: [{ filename: 'Skyrim.esm', hash: 'd0' }],
-      loadOrder: ['Skyrim.esm']
-    });
-    const result = createManifestLoader(p).load();
-    assert.equal(result.ok, false);
-    assert.equal(result.reason, 'manifest_unsupported_version');
-  });
-
-  test('versão futura desconhecida falha fechado', () => {
-    const p = writeManifest('futuro.json', publishableEnvelope({
-      manifestVersion: 2,
-      mods: [{ filename: 'Skyrim.esm', hash: 'd0' }],
-      loadOrder: ['Skyrim.esm']
-    }));
-    const result = createManifestLoader(p).load();
-    assert.equal(result.ok, false);
-    assert.equal(result.reason, 'manifest_unsupported_version');
-  });
-
-  test('canal e build inválidos possuem recusas próprias', () => {
-    const invalidChannel = writeManifest('canal-invalido.json', publishableEnvelope({
-      channel: 'nightly',
-      mods: [{ filename: 'Skyrim.esm', hash: 'd0' }],
-      loadOrder: ['Skyrim.esm']
-    }));
-    const invalidBuild = writeManifest('build-invalido.json', publishableEnvelope({
-      build: ' ',
-      mods: [{ filename: 'Skyrim.esm', hash: 'd0' }],
-      loadOrder: ['Skyrim.esm']
-    }));
-    assert.equal(createManifestLoader(invalidChannel).load().reason, 'manifest_invalid_channel');
-    assert.equal(createManifestLoader(invalidBuild).load().reason, 'manifest_invalid_build');
-  });
-
-  test('manifesto totalmente vazio falha fechado com motivo próprio', () => {
-    const p = writeManifest('vazio.json', publishableEnvelope({ mods: [], loadOrder: [] }));
-    const result = createManifestLoader(p).load();
-    assert.equal(result.ok, false);
-    assert.equal(result.reason, 'manifest_empty');
-  });
-
-  test('lista de mods vazia não é publicada mesmo com load order', () => {
-    const p = writeManifest('mods-vazios.json', publishableEnvelope({
-      mods: [],
-      loadOrder: ['Skyrim.esm']
-    }));
-    const result = createManifestLoader(p).load();
-    assert.equal(result.ok, false);
-    assert.equal(result.reason, 'manifest_empty');
-  });
-
-  test('load order vazia não é publicada mesmo com arquivo listado', () => {
-    const p = writeManifest('ordem-vazia.json', publishableEnvelope({
-      mods: [{ filename: 'Skyrim.esm', hash: 'd0' }],
-      loadOrder: []
-    }));
-    const result = createManifestLoader(p).load();
-    assert.equal(result.ok, false);
-    assert.equal(result.reason, 'manifest_empty');
-  });
-
-  test('carrega manifesto válido', () => {
-    const p = writeManifest('valido.json', publishableEnvelope({
-      mods: [{ filename: 'Skyrim.esm', hash: 'd0' }, { filename: 'HeavyRP.esm', hash: 'a1' }],
-      loadOrder: ['Skyrim.esm', 'HeavyRP.esm']
-    }));
-    const result = createManifestLoader(p).load();
-    assert.equal(result.ok, true);
-    assert.equal(result.manifest.mods.length, 2);
-    assert.deepEqual(result.manifest.loadOrder, ['Skyrim.esm', 'HeavyRP.esm']);
-  });
-
-  test('recarrega quando o arquivo muda no disco', () => {
-    const p = writeManifest('cache.json', publishableEnvelope({
-      mods: [{ filename: 'a.esp', hash: '1' }],
-      loadOrder: ['a.esp']
-    }));
-    const loader = createManifestLoader(p);
-
-    assert.equal(loader.load().manifest.mods.length, 1);
-
-    // mtime tem granularidade de ms em alguns sistemas; forçamos um valor
-    // distinto pra garantir que o teste exercite a invalidação e não o acaso.
-    fs.writeFileSync(p, JSON.stringify(publishableEnvelope({
-      mods: [{ filename: 'a.esp', hash: '1' }, { filename: 'b.esp', hash: '2' }],
-      loadOrder: ['a.esp', 'b.esp']
-    })));
-    const future = new Date(Date.now() + 5000);
-    fs.utimesSync(p, future, future);
-
-    assert.equal(loader.load().manifest.mods.length, 2, 'o cache deveria ter sido invalidado pelo mtime');
-  });
+test('isValidManifest usa contrato v2 estrito', () => {
+  assert.equal(isValidManifest(payload()), true);
+  assert.equal(isValidManifest(payload({ files: [] })), false);
 });

@@ -51,6 +51,7 @@ global.mp = {
 const npcCleaner = require('./npc-cleaner');
 
 after(() => {
+  npcCleaner.stopWorldCleaner();
   if (originalMp === undefined) delete global.mp;
   else global.mp = originalMp;
 });
@@ -173,5 +174,23 @@ describe('npc-cleaner — config invalida nao vira remocao', () => {
     // que estivesse na lista, sem margem. O default e o unico valor honesto.
     const p = { ...policy(), safeRadius: Number.NaN };
     assert.strictEqual(npcCleaner._shouldRemove(BASE_BLOQUEADO, 99999, p), false);
+  });
+});
+
+describe('npc-cleaner — lifecycle', () => {
+  it('nao cria intervalos duplicados e pode reiniciar depois do shutdown', () => {
+    assert.strictEqual(npcCleaner.startWorldCleaner(policy()), true);
+    assert.strictEqual(npcCleaner.isWorldCleanerRunning(), true);
+    assert.strictEqual(
+      npcCleaner.startWorldCleaner(policy()), false,
+      'uma segunda inicializacao nao pode criar outro intervalo'
+    );
+
+    assert.strictEqual(npcCleaner.stopWorldCleaner(), true);
+    assert.strictEqual(npcCleaner.isWorldCleanerRunning(), false);
+    assert.strictEqual(npcCleaner.stopWorldCleaner(), false);
+
+    assert.strictEqual(npcCleaner.startWorldCleaner(policy()), true);
+    assert.strictEqual(npcCleaner.stopWorldCleaner(), true);
   });
 });

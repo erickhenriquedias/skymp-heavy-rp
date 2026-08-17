@@ -19,15 +19,48 @@ O launcher fala com quatro endereços diferentes. Confundi-los é a origem da ma
 
 ## 2. Atualização de cliente e de mods (GitHub Releases)
 
-Dois manifestos separados, ambos em release do `VITE_GITHUB_DIST_REPO`:
+Dois manifestos separados, ambos em release do `VITE_GITHUB_DIST_REPO` e
+obrigatoriamente dentro de um envelope Ed25519 assinado:
 
 - **Cliente** — `releases/latest/download/client-update.json`
-  `{ clientVersion, downloadUrl, sha256, sizeBytes, notes }`
+  payload `{ kind: "client", channel, clientVersion, downloadUrl, sha256, sizeBytes, notes }`
 - **Modpack** — `releases/download/mods/mods-dist.json`
-  `{ modsVersion, downloadUrl | parts[], sha256, contentSig, mandatory, sizeBytes }`
+  payload `{ kind: "mods", channel, modsVersion, downloadUrl | parts[], sha256, contentSig, mandatory, sizeBytes }`
+
+O arquivo publicado não é mais esse payload solto. O formato externo é:
+
+```json
+{
+  "signatureVersion": 1,
+  "keyId": "release-2026",
+  "sequence": 42,
+  "issuedAt": "2026-08-16T12:00:00.000Z",
+  "expiresAt": "2026-08-23T12:00:00.000Z",
+  "payload": { "kind": "client", "channel": "stable", "clientVersion": "2.0.0" },
+  "signature": "BASE64_ED25519"
+}
+```
+
+O launcher contém somente as chaves **públicas** SPKI pinadas em
+`VITE_UPDATE_PUBLIC_KEYS`. Ele canonicaliza o envelope sem `signature`, confere
+a assinatura Ed25519, `kind`, janela de validade e só então lê URL, hash ou
+versão. Assim, trocar o JSON e recalcular o SHA-256 do ZIP não basta para
+publicar código como se fosse da equipe.
+
+`sequence` é um inteiro monotônico por canal (`client` e `mods`), não uma versão
+semântica. O launcher persiste o maior envelope aceito em
+`update-security.json` no `userData` e também inclui
+`skymp_client_release.json`/`skymp_mods_release.json` na transação da pasta do
+jogo. Um número menor é downgrade e o mesmo número com digest diferente é
+reuso malicioso. Um replay byte a byte idêntico é aceito para permitir retry. O
+histórico fora da pasta do jogo não volta com **Desfazer Update**: rollback N-1
+continua funcionando localmente, mas não autoriza um feed remoto antigo.
 
 Regras que o código já aplica (`apps/launcher/electron/main.ts`):
 
+- **Assinatura vem antes do download.** Chave ausente/desconhecida, assinatura
+  adulterada, manifesto expirado/futuro, downgrade e reuso de sequência falham
+  fechados.
 - **Hash ausente aborta.** Tanto no cliente quanto em cada parte do modpack, um manifesto sem `sha256` faz o download falhar em vez de instalar sem verificação. Isso é deliberado: um manifesto malformado é indistinguível de um comprometido.
 - **SHA-256 confere antes de extrair**, nunca depois.
 - **O diretório central do ZIP é inspecionado antes de extrair.** O launcher
@@ -42,11 +75,144 @@ Regras que o código já aplica (`apps/launcher/electron/main.ts`):
 - **Download em partes** com `contentSig` por parte, pra pular pedaços que não mudaram — o modpack é grande demais pra rebaixar inteiro a cada versão.
 - **Carimbos locais** (`skymp_client_version.txt`, `skymp_mods_version.txt`, `skymp_mods_parts.json`) na pasta do jogo dizem o que está instalado sem precisar re-hashear tudo.
 
-## 3. Paridade em tempo de conexão — **falta o servidor**
+### Transação, recuperação e rollback
+
+Cliente e modpack não são mais extraídos sobre a instalação viva. O launcher:
+
+1. cria `.skyrp-updater/active` no mesmo volume e adquire um lock com PID e ID
+   da transação;
+2. baixa, confere o SHA-256 e extrai todas as partes em `staging/`;
+3. registra antes da primeira mutação um journal com cada arquivo gerenciado;
+4. move a versão anterior desses arquivos para `backup/` e publica os novos por
+   `rename` no mesmo volume;
+5. grava `phase=committed` antes de trocar o ponteiro N-1; uma queda anterior
+   desfaz a transação, e uma queda posterior termina a publicação;
+6. inclui os carimbos e listas de ownership na mesma transação;
+7. preserva o backup da release N-1 e oferece **Desfazer Update** nas
+   configurações.
+
+Se o processo morrer durante o commit, o próximo launcher restaura o journal
+antes de iniciar outra atualização. Arquivos obsoletos só são removidos quando
+constavam na lista gerenciada anterior; arquivos alheios ao manifesto não entram
+no plano. Pacotes não podem escrever nos metadados do updater, atravessar
+symlink/junction, nem compartilhar o mesmo arquivo entre os domínios cliente e
+mods. Um segundo processo é recusado pelo lock.
+
+Não chamamos a sequência de múltiplos arquivos de primitiva atômica do
+filesystem: apenas cada `rename` individual é atômico. A garantia implementada é
+transacional e recuperável com o jogo fechado. Queda de energia real,
+antivírus segurando DLL, falta de espaço e execução no launcher empacotado
+continuam na lista operacional de testes.
+
+### Gate obrigatório antes de jogar e repair disponível
+
+O renderer não encadeia mais sozinho as decisões críticas. `prepare-to-play`,
+no processo principal, exige nesta ordem: caminho/cliente, feeds assinados sem
+update pendente, paridade contra `/mods.json`, escrita da load order e análise
+dos headers/Creation Club. Só então emite um recibo aleatório vinculado ao
+Discord e ao caminho canônico do jogo, válido por até quatro horas.
+
+`join-queue`, `poll-queue` e `launch-game` recusam chamadas sem esse recibo.
+`launch-game` o consome uma única vez antes de injetar a sessão SkyMP. Isso evita
+que um erro ou navegação do renderer pule acidentalmente o gate; não substitui o
+gate server-side contra um launcher deliberadamente modificado.
+
+Quando o feed aponta versão nova, a Home oferece atualizar cliente/mods. Quando
+a paridade diverge, oferece **REPARAR MODS** incremental. O processo principal
+baixa apenas arquivos ausentes ou corrompidos que possuam `downloadUrl` no manifesto,
+confere tamanho e SHA-256 antes do commit e reutiliza a mesma
+transação/journal/rollback do updater. Uma reparação acima de 500 MB exige uma
+segunda confirmação. Arquivos sem URL são tratados como instalação manual;
+arquivos extras e symlinks/junctions nunca são removidos automaticamente.
+
+Depois do commit, o launcher repete a verificação completa. Se a paridade ainda
+falhar, desfaz a transação. Falha apenas na análise de load order direciona para
+Configurações, pois baixar novamente arquivos cujo SHA já está correto não
+corrigiria masters/ordem e criaria um ciclo de reparo sem efeito.
+
+Durante download, hash ou extração, **CANCELAR OPERAÇÃO** sinaliza o processo
+principal, encerra a requisição ativa e descarta staging/temporários antes de
+qualquer publicação. Hash/extração já em execução terminam a etapa corrente e
+checam o cancelamento antes do commit. Quando o commit começa, cancelar é
+recusado e a UI manda aguardar: interromper renames nessa fase seria menos seguro
+que concluir ou deixar o journal recuperar no próximo boot.
+
+O empacotador inclui somente `dist/`, `dist-electron/main.js`,
+`dist-electron/preload.js` e `package.json`. Nunca use
+`dist-electron/**/*`: essa pasta também é a saída do builder e a glob reempacota
+builds anteriores recursivamente. A falha foi reproduzida com um temporário de
+2,34 GB; após restringir as entradas, o NSIS voltou a aproximadamente 98 MB.
+
+Somente `npm run dev`, sem `VITE_GITHUB_DIST_REPO`, pula a consulta dos feeds
+para permitir a Fase 0 local. `app.isPackaged` impede esse bypass em qualquer
+executável empacotado.
+
+### Assinando um manifesto de release
+
+A chave privada precisa ser PKCS8 DER em base64 e existir somente no ambiente
+seguro de release, na variável `UPDATE_SIGNING_PRIVATE_KEY`. O script nunca a
+aceita por argumento nem a escreve no resultado:
+
+```powershell
+node scripts/release/generate-update-keypair.js `
+  --key-id release-2026 `
+  --private-out 'D:/segredos/release-2026.update-signing.pk8.base64'
+
+$env:UPDATE_SIGNING_PRIVATE_KEY = '<PKCS8_DER_BASE64>'
+node scripts/release/sign-update-manifest.js `
+  --input artifacts/client-payload.json `
+  --output artifacts/client-update.json `
+  --kind client `
+  --sequence 42 `
+  --key-id release-2026 `
+  --expires-hours 168
+Remove-Item Env:UPDATE_SIGNING_PRIVATE_KEY
+```
+
+O gerador cria o arquivo privado com criação exclusiva (não sobrescreve uma
+chave existente) e imprime somente o JSON da chave pública que deve ir para
+`UPDATE_PUBLIC_KEYS_JSON`. Guarde backup offline do arquivo privado; perdê-lo
+exige rotação por um launcher ainda assinado com uma chave confiável.
+
+O payload de entrada fica separado e não pode conter campos reservados do
+envelope. A saída é escrita por temporário + `rename`. Para o launcher de
+produção, configure a Repository Variable pública `UPDATE_PUBLIC_KEYS_JSON`; o
+workflow de release falha se ela estiver ausente, vazia ou não contiver chaves
+Ed25519/SPKI válidas.
+
+Rotação segura ocorre em duas releases: primeiro distribua um launcher que
+confia na chave antiga e na nova; depois passe a assinar com a nova. Só remova a
+antiga do pin em uma versão posterior do launcher. Remover o `keyId` equivale a
+revogá-lo, mas launchers antigos precisam ser retirados do canal — nenhum feed
+assinado pode ensinar uma nova raiz de confiança a um binário já comprometido.
+
+### Canais de atualização
+
+O build fixa `VITE_CLIENT_UPDATE_CHANNEL` e `VITE_MODS_UPDATE_CHANNEL` em
+`stable`, `beta` ou `development`. O modpack pode acompanhar o canal do cliente
+ou ser homologado separadamente. Todo payload assinado de `client`, `mods` e
+`parity` precisa declarar o mesmo `channel`; assinatura válida no canal errado
+é recusada.
+
+`stable` preserva `releases/latest/download/client-update.json` e a tag `mods`.
+Os demais usam `client-beta`/`client-development` e
+`mods-beta`/`mods-development`. O histórico anti-downgrade é separado por
+tipo+canal, e o recibo instalado registra o canal. Assim uma sequência de teste
+alta não autoriza downgrade nem bloqueia o canal estável.
+
+## 3. Paridade em tempo de conexão — manifesto v2 assinado
 
 Antes de jogar, o launcher roda dois passos:
 
-1. **`verify-mods`** — baixa `http://<SERVER_IP>:<API_PORT>/mods.json`, no formato `{ manifestVersion: 1, channel, build, mods: [{ filename, hash }], loadOrder: [...] }`, e compara o hash de cada arquivo correspondente em `Data/`. **Este passo usa MD5**, não SHA-256 — é uma checagem de integridade/paridade, não uma barreira criptográfica, e é diferente do SHA-256 usado no download (seção 2). Cada arquivo exigido é lido por stream e os hashes são calculados sequencialmente, sem carregar uma BSA inteira na memória. Manifesto legado, versão futura, canal desconhecido ou build vazio é recusado pelo servidor e novamente pelo launcher.
+1. **`verify-mods`** — baixa `/mods.json`, verifica primeiro o envelope Ed25519
+   `kind: "parity"`, validade, chave e `sequence`, e só então aceita o payload
+   `manifestVersion: 2`. Cada entrada contém path canônico sob `Data/`, tamanho,
+   SHA-256, categoria, obrigatoriedade e URL HTTPS opcional. Arquivos são lidos
+   por stream, sequencialmente, inclusive em subdiretórios. O conjunto cobre
+   **todo arquivo regular** sob `Data/`, não apenas plugins e BSAs: JavaScript do
+   Skyrim Platform, SWF/CSS de SkyUI e RaceMenu, meshes, texturas, animações,
+   áudio e arquivos sem extensão também participam. A política de extras é
+   explícita: `reject`, `warn` ou `ignore`.
 2. **`analyze-plugins`** — lê o header de cada `.esp`/`.esl`/`.esm`, confere que todo master existe localmente e aparece **antes** do dependente na ordem informada pelo servidor.
 
 Os dois juntos é que fecham o contrato de FormID descrito em `docs/technical/MODS_AND_GAMEMODE_CONTRACT.md` seção 3: o (1) garante conteúdo igual, o (2) garante ordem igual.
@@ -57,19 +223,45 @@ Quem serve esses endpoints é o **`apps/game-api`**.
 
 O manifesto não é gerado sob demanda — hashear dezenas de GB dentro de uma requisição HTTP seria lento e daria margem a servir um manifesto inconsistente enquanto alguém copia arquivos pra pasta. Gere offline, a partir da pasta `Data/` de referência do servidor:
 
-```bash
-cd apps/game-api && node scripts/generate-mods-manifest.js "D:/SteamLibrary/steamapps/common/Skyrim Special Edition/Data" --plugins-txt "%LOCALAPPDATA%/Skyrim Special Edition/plugins.txt" --channel stable --build "2026.08.16"
+```powershell
+$env:UPDATE_SIGNING_PRIVATE_KEY = '<PKCS8_DER_BASE64>'
+cd apps/game-api
+node scripts/generate-mods-manifest.js `
+  "D:/SteamLibrary/steamapps/common/Skyrim Special Edition/Data" `
+  --plugins-txt "$env:LOCALAPPDATA/Skyrim Special Edition/plugins.txt" `
+  --channel stable --build "2026.08.16" --sequence 42 `
+  --key-id release-2026 --distribution-map distribution-map.json `
+  --extra-file-policy reject --out mods.json
+Remove-Item Env:UPDATE_SIGNING_PRIVATE_KEY
 ```
 
-`--plugins-txt` importa: sem ele o script infere a load order pela ordem alfabética do diretório, que **não** é a load order real do Skyrim. Serve pra teste local, mas em produção geraria um manifesto que reprova clientes corretos. O script avisa alto quando isso acontece.
+`--plugins-txt`, `--build`, `--sequence` e `--key-id` são obrigatórios. Não há
+fallback alfabético: a ordem do diretório não é a load order real do Skyrim.
+Use `--only-load-order` somente quando o objetivo deliberado for não exigir
+arquivos além dos plugins ativos.
 
-`--channel` aceita apenas `development`, `beta` ou `stable`. `--build` identifica
-o modpack publicado. Sem argumentos, o gerador usa `development` e
-`unversioned` para desenvolvimento local; uma publicação deve informar ambos.
-O caminho absoluto da pasta `Data` usada na geração não é gravado no JSON
-público.
+O payload também carrega `ignoredPaths`, uma lista pequena de paths canônicos
+exatos e assinados. O gerador inclui por padrão somente
+`Data/Platform/Plugins/skymp5-client-settings.txt`, pois o launcher altera esse
+arquivo a cada sessão. Uma exceção operacional adicional exige
+`--ignore-path Data/caminho`; não há glob, diretório inteiro ou path fora de
+`Data/`, e duplicação ou colisão com um arquivo do manifesto invalida o
+contrato. A lista deve ser auditada como código de release: ela não serve para
+ocultar mod, DLL ou asset incompatível.
 
-Se o manifesto estiver ausente, corrompido, com `mods` vazio ou com `loadOrder`
+O mapa de distribuição é um JSON de `Data/caminho` para URL HTTPS. Somente os
+arquivos licenciados para redistribuição devem entrar nele; arquivos sem mapeamento
+continuam cobertos pela paridade, mas o repair os reporta como manuais. O gerador
+recusa paths desconhecidos, colisões de caixa, symlinks e URLs inseguras. O
+caminho absoluto da máquina geradora nunca vai para o resultado.
+
+O resultado é um envelope assinado, não o payload solto. `apps/game-api` usa
+`MODS_MANIFEST_PUBLIC_KEYS` para verificar assinatura/validade em todo acesso e
+responde 503 para manifesto ausente, expirado, adulterado ou incompatível. O
+launcher usa suas chaves pinadas e mantém high-watermark separado para
+`parity:<channel>`, impedindo downgrade/reuso de sequência.
+
+Se o manifesto estiver ausente, corrompido, com `files` vazio ou com `loadOrder`
 vazia, `/mods.json` responde **503**, nunca uma lista vazia — lista vazia
 passaria na verificação de paridade do launcher e deixaria qualquer modpack
 entrar, que é o oposto do propósito.
@@ -82,9 +274,16 @@ Capacidade fixa de slots (`QUEUE_CAPACITY`). Quem chega e encontra slot livre en
 
 ## 4. Login
 
+**Decisão de produto: a única autenticação de conta é Discord.** A presença da
+Steam é verificada somente para aceitar uma instalação legítima e compatível do
+Skyrim Special Edition 1.6.1170.0. Não existe Steam Auth, fallback nem segundo
+fator. O OAuth Discord solicita também `connections`; quando o Discord retorna
+uma conexão Steam verificada, o painel registra o `steam_id` como identificador
+secundário da mesma conta. Esse campo nunca autoriza entrada ou whitelist.
+
 O launcher abre o consentimento do Discord, sobe um servidor de callback local em `127.0.0.1:19847` e recebe o `code`. **A troca do `code` por token acontece no painel web** (`POST /api/launcher/oauth/exchange` em `apps/web/server.js`), não no launcher.
 
-O motivo é simples: tudo que é `VITE_*` é embutido no instalador em tempo de build, e o instalador é distribuído aos jogadores. Um client secret ali dentro pode ser extraído por qualquer pessoa que baixe o jogo. O launcher recebe de volta só o perfil público (`discordId`, `username`, `globalName`, `avatar`) — nem o access token, que ele não tem uso pra guardar.
+O motivo é simples: tudo que é `VITE_*` é embutido no instalador em tempo de build, e o instalador é distribuído aos jogadores. Um client secret ali dentro pode ser extraído por qualquer pessoa que baixe o jogo. O launcher recebe de volta só o perfil público (`discordId`, `username`, `globalName`, `avatar` e o `steamId` secundário quando disponível) — nunca o access token.
 
 O painel valida o `redirect_uri` contra uma allowlist (`LAUNCHER_REDIRECT_URIS`) pra que um `code` interceptado não possa ser trocado apontando pra um endereço de terceiro.
 

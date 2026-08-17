@@ -46,6 +46,20 @@ jobs:
         working-directory: apps/launcher
         run: npm run typecheck
 
+      # O launcher sem a chave publica embutida recusa corretamente todo feed,
+      # mas seria inutilizavel em producao. A configuracao e Repository Variable
+      # porque e publica; a chave privada nunca participa deste build.
+      - name: Exigir chaves publicas do updater
+        shell: bash
+        env:
+          UPDATE_PUBLIC_KEYS_JSON: ${{ vars.UPDATE_PUBLIC_KEYS_JSON }}
+        run: |
+          if [ -z "$UPDATE_PUBLIC_KEYS_JSON" ]; then
+            echo "::error::Repository variable UPDATE_PUBLIC_KEYS_JSON ausente. O launcher nao pode autenticar releases."
+            exit 1
+          fi
+          node -e "require('./skymp/packages/signed-update-manifest.js').parsePinnedPublicKeys(process.env.UPDATE_PUBLIC_KEYS_JSON)"
+
       # Diz em alto e bom som se este build vai sair assinado ou não. Sem isto,
       # um instalador não assinado passa despercebido até um jogador reclamar do
       # SmartScreen — que é semanas depois e longe daqui.
@@ -72,6 +86,7 @@ jobs:
         env:
           CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+          VITE_UPDATE_PUBLIC_KEYS: ${{ vars.UPDATE_PUBLIC_KEYS_JSON }}
         run: npm run build
 
       # Verificação de verdade, não "o arquivo existe". `Get-AuthenticodeSignature`

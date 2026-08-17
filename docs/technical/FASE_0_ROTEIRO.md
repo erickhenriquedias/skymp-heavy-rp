@@ -80,14 +80,16 @@ Todas vão no `skymp/gamemode/.env`. A coluna diz **para qual etapa** cada uma e
 
 | # | Faça | Espere | Se falhar |
 |---|---|---|---|
-| 0.1 | `cd skymp/gamemode && npm test` | 444 passando | Não comece. Conserte antes. |
+| 0.1 | `cd skymp/gamemode && npm test` | 901 testes: 900 passando e 1 ignorado | Não comece. Conserte antes. |
 | 0.2 | `npm run test:systems` | 13/13 | Comando, permissão ou flag fora do lugar |
 | 0.3 | `npm run db:setup` e depois `npm run check:schema` | runner chega à versão atual e o check imprime `[OK] banco e migrations estao alinhados` | Não aplique arquivos à mão. O runner usa lock, ordem numérica, checksum e retomada; qualquer falha bloqueia o boot antes dos módulos. |
-| 0.4 | Confira `apps/game-api/mods.json` | Existe e tem `mods` e `loadOrder` | `/mods.json` responde 503 e **ninguém entra**. Gere com `node scripts/generate-mods-manifest.js` |
+| 0.4 | Confira `apps/game-api/mods.json` e as chaves públicas nos `.env` da game-api e gamemode | Envelope Ed25519 válido; payload v2 tem `files` e `loadOrder`; ambos usam o mesmo mapa de chaves | A game-api fica `not ready` ou o SkyMP aborta antes do banco. Configure `PARITY_MANIFEST_PATH` e `MODS_MANIFEST_PUBLIC_KEYS`; veja `LAUNCHER_DISTRIBUTION.md` |
 | 0.5 | `.\scripts\phase0\Start-AllServices.ps1` | Nenhum aviso vermelho | O script diz o que não vai subir. Ele não mente por otimismo |
 
 **Flags no `.env` do gamemode:**
 ```
+PARITY_MANIFEST_PATH=../../apps/game-api/mods.json
+MODS_MANIFEST_PUBLIC_KEYS={"phase0":"<SPKI_PUBLICA_BASE64>"}
 ENABLE_GOVERNANCE_SERVICE=true
 ENABLE_MARKET_STALLS_SERVICE=true
 ENABLE_DEATH_SERVICE=true

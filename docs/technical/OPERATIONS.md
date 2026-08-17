@@ -21,8 +21,20 @@ O script confere, **antes** de despachar qualquer processo:
 | `node_modules` presente | Idem — foi assim que o painel web ficou fora do ar sem ninguém notar |
 | `apps/game-api/mods.json` existe | `/mods.json` responde 503 e **nenhum jogador passa da verificação de paridade** |
 | Banco alinhado com as migrations | Ver §2 — a falha mais cara de diagnosticar do projeto |
+| Config doctor do ambiente | `offlineMode`, master, TLS, masterKey e hot reload inseguros bloqueiam o boot |
+| Portas livres | Evita subir uma segunda stack sobre processos antigos ou serviços estranhos |
 
-Se ele reclamar, resolva o que ele apontou. Ele não mente por otimismo: prefere avisar que um serviço não vai subir a dizer "concluída" com um processo morto.
+Se ele reclamar, resolva o que ele apontou. O preflight agora é indivisível:
+uma falha impede **todos** os processos. Depois do boot, a mesma janela mantém o
+supervisor em foreground, executa health/readiness, aplica backoff e encerra o
+grupo com `Ctrl+C`. Detalhes em
+[`SERVICE_SUPERVISOR.md`](SERVICE_SUPERVISOR.md).
+
+Para conferir sem iniciar:
+
+```powershell
+.\scripts\phase0\Start-AllServices.ps1 -Environment local -CheckOnly
+```
 
 ---
 
